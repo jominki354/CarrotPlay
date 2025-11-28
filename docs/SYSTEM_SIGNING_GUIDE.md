@@ -129,6 +129,152 @@ Signer #1 certificate SHA-1 digest: 27196e386b875e76adf700e7ea84e4c6eee33dfa
 
 ---
 
+## ⚠️ 예외 상황 및 대체 서명 방법
+
+### apksigner가 작동하지 않을 때 (jarsigner 사용)
+
+apksigner가 오류를 발생시키거나 출력 파일이 생성되지 않는 경우, jarsigner를 대안으로 사용할 수 있습니다:
+
+```powershell
+# 1. APK 복사 (원본 보존)
+Copy-Item "D:\nMirror\carcar_launcher\build\app\outputs\flutter-apk\app-debug.apk" "D:\nMirror\carcar_launcher\build\app-debug-unsigned.apk"
+
+# 2. jarsigner로 서명
+jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 `
+  -keystore D:\nMirror\tools\aosp_keys\platform.p12 `
+  -storepass android `
+  -keypass android `
+  -signedjar D:\nMirror\carcar_launcher\build\app-debug-signed.apk `
+  D:\nMirror\carcar_launcher\build\app-debug-unsigned.apk `
+  platform
+```
+
+**jarsigner vs apksigner 차이점:**
+| 항목 | jarsigner | apksigner |
+|------|-----------|-----------|
+| V1 서명 | ✅ | ✅ |
+| V2 서명 (Android 7+) | ❌ | ✅ |
+| V3 서명 (Android 9+) | ❌ | ✅ |
+| 권장 | 레거시/호환성 | 최신 Android |
+
+> ⚠️ jarsigner는 V1 서명만 생성합니다. Android 7+ 기기에서 더 나은 보안과 설치 속도를 위해 apksigner 사용을 권장합니다.
+
+---
+
+## 🎯 2가지 빌드 전략
+
+CarrotPlay는 두 가지 모드로 빌드할 수 있습니다:
+
+### 전략 1: 시스템 앱 모드 (AOSP 기기용)
+
+**대상:** AOSP 테스트 키를 사용하는 기기, 에뮬레이터, 커스텀 ROM
+
+```xml
+<!-- AndroidManifest.xml -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    android:sharedUserId="android.uid.system">
+```
+
+**기능:**
+- ✅ `TaskStackListener`로 실시간 Activity 모니터링
+- ✅ `IActivityTaskManager` API로 Task 제어
+- ✅ `setFocusedRootTask()`로 포커스 강제 설정
+- ✅ `forceStopPackage()` 시스템 API
+- ✅ 스플래시 → 메인 Activity 전환 시 자동 추적
+
+**빌드 & 서명:**
+```powershell
+# sharedUserId 활성화 상태로 빌드
+C:\flutter\bin\flutter build apk --debug
+
+# AOSP 테스트 키로 서명
+jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 `
+  -keystore D:\nMirror\tools\aosp_keys\platform.p12 `
+  -storepass android -keypass android `
+  -signedjar build\app-debug-signed.apk `
+  build\app\outputs\flutter-apk\app-debug.apk platform
+```
+
+### 전략 2: 일반 앱 모드 (제조사 기기용 - Root 필요)
+
+**대상:** 삼성, LG, 샤오미 등 제조사 ROM (Root 필수)
+
+```xml
+<!-- AndroidManifest.xml - sharedUserId 제거 또는 주석 처리 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- android:sharedUserId="android.uid.system" -->
+```
+
+**기능:**
+- ✅ Root shell로 터치 주입 (`input tap/swipe`)
+- ✅ Root shell로 앱 제어 (`am force-stop`, `am start`)
+- ⚠️ 실시간 Activity 모니터링 제한 (폴링 필요)
+- ⚠️ 스플래시 → 메인 전환 시 약간의 지연 가능
+
+**빌드:**
+```powershell
+# 1. AndroidManifest.xml에서 sharedUserId 주석 처리
+# 2. 일반 debug 서명으로 빌드 (별도 서명 불필요)
+C:\flutter\bin\flutter build apk --debug
+
+# 출력: build\app\outputs\flutter-apk\app-debug.apk
+```
+
+### 빌드 전략 선택 가이드
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    기기 종류 확인                            │
+└─────────────────────────────────────────────────────────────┘
+                           │
+           ┌───────────────┴───────────────┐
+           ▼                               ▼
+   ┌───────────────┐               ┌───────────────┐
+   │ AOSP/에뮬레이터 │               │  제조사 ROM    │
+   │ 커스텀 ROM     │               │ (삼성/LG/샤오미)│
+   └───────────────┘               └───────────────┘
+           │                               │
+           ▼                               ▼
+   ┌───────────────┐               ┌───────────────┐
+   │ 전략 1 사용    │               │  Root 있음?   │
+   │ (시스템 앱)    │               └───────────────┘
+   └───────────────┘                   │       │
+                                  Yes ─┘       └─ No
+                                   │               │
+                                   ▼               ▼
+                           ┌───────────┐   ┌───────────┐
+                           │ 전략 2    │   │ 기능 제한 │
+                           │ (Root)    │   │ (터치만)  │
+                           └───────────┘   └───────────┘
+```
+
+---
+
+## 🔧 빠른 모드 전환 스크립트
+
+### switch_to_system_mode.ps1
+```powershell
+# 시스템 앱 모드로 전환
+$manifest = "D:\nMirror\carcar_launcher\android\app\src\main\AndroidManifest.xml"
+$content = Get-Content $manifest -Raw
+$content = $content -replace '<!-- android:sharedUserId="android.uid.system" -->', 'android:sharedUserId="android.uid.system"'
+$content = $content -replace '<manifest xmlns:android="http://schemas.android.com/apk/res/android">', '<manifest xmlns:android="http://schemas.android.com/apk/res/android"`n    android:sharedUserId="android.uid.system">'
+Set-Content $manifest $content
+Write-Host "✅ Switched to SYSTEM APP mode" -ForegroundColor Green
+```
+
+### switch_to_normal_mode.ps1
+```powershell
+# 일반 앱 모드로 전환
+$manifest = "D:\nMirror\carcar_launcher\android\app\src\main\AndroidManifest.xml"
+$content = Get-Content $manifest -Raw
+$content = $content -replace 'android:sharedUserId="android.uid.system"', '<!-- android:sharedUserId="android.uid.system" -->'
+Set-Content $manifest $content
+Write-Host "✅ Switched to NORMAL APP mode (Root fallback)" -ForegroundColor Green
+```
+
+---
+
 ## 호환성
 
 ### ✅ 작동하는 환경
