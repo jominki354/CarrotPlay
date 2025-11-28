@@ -232,6 +232,63 @@ class MainActivity : FlutterActivity() {
                         runOnUiThread { result.success(success) }
                     }.start()
                 }
+                // ============================================
+                // Touch Injection (Root 기반)
+                // ============================================
+                "injectTap" -> {
+                    val displayId = call.argument<Int>("displayId") ?: 0
+                    val x = call.argument<Int>("x") ?: 0
+                    val y = call.argument<Int>("y") ?: 0
+                    
+                    Thread {
+                        val success = injectTap(displayId, x, y)
+                        runOnUiThread { result.success(success) }
+                    }.start()
+                }
+                "injectSwipe" -> {
+                    val displayId = call.argument<Int>("displayId") ?: 0
+                    val x1 = call.argument<Int>("x1") ?: 0
+                    val y1 = call.argument<Int>("y1") ?: 0
+                    val x2 = call.argument<Int>("x2") ?: 0
+                    val y2 = call.argument<Int>("y2") ?: 0
+                    val duration = call.argument<Int>("duration") ?: 300
+                    
+                    Thread {
+                        val success = injectSwipe(displayId, x1, y1, x2, y2, duration)
+                        runOnUiThread { result.success(success) }
+                    }.start()
+                }
+                "sendKeyEvent" -> {
+                    val displayId = call.argument<Int>("displayId") ?: 0
+                    val keyCode = call.argument<Int>("keyCode") ?: 0
+                    
+                    Thread {
+                        val success = sendKeyEvent(displayId, keyCode)
+                        runOnUiThread { result.success(success) }
+                    }.start()
+                }
+                "forceStopApp" -> {
+                    val packageName = call.argument<String>("packageName")
+                    if (packageName != null) {
+                        Thread {
+                            val success = forceStopApp(packageName)
+                            runOnUiThread { result.success(success) }
+                        }.start()
+                    } else {
+                        result.error("INVALID_ARGS", "Package name required", null)
+                    }
+                }
+                "moveToMainDisplay" -> {
+                    val packageName = call.argument<String>("packageName")
+                    if (packageName != null) {
+                        Thread {
+                            val success = moveToMainDisplay(packageName)
+                            runOnUiThread { result.success(success) }
+                        }.start()
+                    } else {
+                        result.error("INVALID_ARGS", "Package name required", null)
+                    }
+                }
                 else -> {
                     Log.w(TAG, "Method not implemented: ${call.method}")
                     result.notImplemented()
@@ -416,5 +473,86 @@ class MainActivity : FlutterActivity() {
             Log.e(TAG, "Exception installing system app", e)
             return false
         }
+    }
+
+    // ============================================
+    // Touch Injection (Root Shell)
+    // ============================================
+    
+    private fun injectTap(displayId: Int, x: Int, y: Int): Boolean {
+        Log.d(TAG, "Injecting tap at ($x, $y) on display $displayId")
+        
+        // Android 12+ 에서는 -d 옵션으로 displayId 지정 가능
+        // 그 이하 버전에서는 무시됨
+        val cmd = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            "input -d $displayId tap $x $y"
+        } else {
+            "input tap $x $y"
+        }
+        
+        val result = RootUtils.executeCommand(cmd)
+        if (!result.success) {
+            Log.e(TAG, "Tap injection failed: ${result.error}")
+        }
+        return result.success
+    }
+
+    private fun injectSwipe(displayId: Int, x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Int): Boolean {
+        Log.d(TAG, "Injecting swipe from ($x1, $y1) to ($x2, $y2) duration=$durationMs on display $displayId")
+        
+        val cmd = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            "input -d $displayId swipe $x1 $y1 $x2 $y2 $durationMs"
+        } else {
+            "input swipe $x1 $y1 $x2 $y2 $durationMs"
+        }
+        
+        val result = RootUtils.executeCommand(cmd)
+        if (!result.success) {
+            Log.e(TAG, "Swipe injection failed: ${result.error}")
+        }
+        return result.success
+    }
+
+    private fun sendKeyEvent(displayId: Int, keyCode: Int): Boolean {
+        Log.d(TAG, "Sending keyevent $keyCode on display $displayId")
+        
+        val cmd = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            "input -d $displayId keyevent $keyCode"
+        } else {
+            "input keyevent $keyCode"
+        }
+        
+        val result = RootUtils.executeCommand(cmd)
+        if (!result.success) {
+            Log.e(TAG, "Key event failed: ${result.error}")
+        }
+        return result.success
+    }
+
+    private fun forceStopApp(packageName: String): Boolean {
+        Log.d(TAG, "Force stopping $packageName")
+        
+        val result = RootUtils.executeCommand("am force-stop $packageName")
+        if (!result.success) {
+            Log.e(TAG, "Force stop failed: ${result.error}")
+        }
+        return result.success
+    }
+
+    private fun moveToMainDisplay(packageName: String): Boolean {
+        Log.d(TAG, "Moving $packageName to main display")
+        
+        // 해당 패키지의 launcher activity 가져오기
+        val launchIntent = context.packageManager.getLaunchIntentForPackage(packageName)
+        val component = launchIntent?.component?.flattenToShortString() ?: return false
+        
+        // 메인 디스플레이(0)에서 앱 시작
+        val cmd = "am start -n \"$component\" --display 0"
+        val result = RootUtils.executeCommand(cmd)
+        
+        if (!result.success) {
+            Log.e(TAG, "Move to main display failed: ${result.error}")
+        }
+        return result.success
     }
 }

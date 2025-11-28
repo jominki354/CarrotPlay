@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'native_service.dart';
 import 'app_selection_screen.dart';
 import 'package:get/get.dart';
+import 'dart:async';
 
 class PipView extends StatefulWidget {
   final int displayId; // Logical ID for our app (1 or 2)
@@ -25,6 +27,16 @@ class _PipViewState extends State<PipView> {
   bool _isInitializing = false;
   String? _errorMessage;
   bool _initialized = false;
+  
+  // 터치 관련
+  bool _showControls = false;
+  Timer? _controlsTimer;
+  int _virtualDisplayWidth = 0;
+  int _virtualDisplayHeight = 0;
+  
+  // 스와이프 감지
+  Offset? _panStartPosition;
+  DateTime? _panStartTime;
 
   @override
   void initState() {
@@ -105,6 +117,8 @@ class _PipViewState extends State<PipView> {
       setState(() {
         _textureId = result['textureId'];
         _virtualDisplayId = result['displayId'];
+        _virtualDisplayWidth = width;
+        _virtualDisplayHeight = height;
         _initialized = true;
         _isInitializing = false;
       });
@@ -179,7 +193,7 @@ class _PipViewState extends State<PipView> {
             child: _buildContent(),
           ),
 
-          // Overlay Controls
+          // Overlay Controls (항상 표시되는 앱 선택 버튼)
           Positioned(
             bottom: 16,
             right: 16,
@@ -189,6 +203,15 @@ class _PipViewState extends State<PipView> {
               child: const Icon(Icons.apps),
             ),
           ),
+          
+          // App Control Bar (터치 시 표시)
+          if (_showControls && _currentPackage != null)
+            Positioned(
+              bottom: 16,
+              left: 16,
+              right: 80,
+              child: _buildControlBar(),
+            ),
           
           // Info Label
           Positioned(
@@ -221,6 +244,89 @@ class _PipViewState extends State<PipView> {
                 ],
               ),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildControlBar() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.black87,
+        borderRadius: BorderRadius.circular(24),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Back 버튼
+          IconButton(
+            icon: const Icon(Icons.arrow_back, color: Colors.white, size: 20),
+            onPressed: () {
+              if (_virtualDisplayId != null) {
+                NativeService.sendBackKey(_virtualDisplayId!);
+              }
+            },
+            tooltip: "Back",
+            padding: const EdgeInsets.all(8),
+            constraints: const BoxConstraints(),
+          ),
+          const SizedBox(width: 8),
+          // Home 버튼
+          IconButton(
+            icon: const Icon(Icons.home, color: Colors.white, size: 20),
+            onPressed: () {
+              if (_virtualDisplayId != null) {
+                NativeService.sendHomeKey(_virtualDisplayId!);
+              }
+            },
+            tooltip: "Home",
+            padding: const EdgeInsets.all(8),
+            constraints: const BoxConstraints(),
+          ),
+          const SizedBox(width: 8),
+          // Recent 버튼
+          IconButton(
+            icon: const Icon(Icons.layers, color: Colors.white, size: 20),
+            onPressed: () {
+              if (_virtualDisplayId != null) {
+                NativeService.sendRecentKey(_virtualDisplayId!);
+              }
+            },
+            tooltip: "Recent Apps",
+            padding: const EdgeInsets.all(8),
+            constraints: const BoxConstraints(),
+          ),
+          const SizedBox(width: 8),
+          // 전체화면 버튼
+          IconButton(
+            icon: const Icon(Icons.fullscreen, color: Colors.white, size: 20),
+            onPressed: () {
+              if (_currentPackage != null) {
+                NativeService.moveToMainDisplay(_currentPackage!);
+              }
+            },
+            tooltip: "Fullscreen",
+            padding: const EdgeInsets.all(8),
+            constraints: const BoxConstraints(),
+          ),
+          const SizedBox(width: 8),
+          // 앱 종료 버튼
+          IconButton(
+            icon: const Icon(Icons.close, color: Colors.redAccent, size: 20),
+            onPressed: () async {
+              if (_currentPackage != null) {
+                await NativeService.forceStopApp(_currentPackage!);
+                setState(() {
+                  _currentPackage = null;
+                  _currentAppName = null;
+                });
+              }
+            },
+            tooltip: "Close App",
+            padding: const EdgeInsets.all(8),
+            constraints: const BoxConstraints(),
           ),
         ],
       ),
@@ -277,9 +383,135 @@ class _PipViewState extends State<PipView> {
       );
     }
 
-    // Note: Touch input injection requires system app privileges (INJECT_EVENTS permission)
-    // VirtualDisplay apps receive touch input directly from Android system
-    // Our app displays the VirtualDisplay content, but touch goes to the app on that display
-    return Texture(textureId: _textureId!);
+    // 터치 가능한 Texture 뷰
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTapDown: _onTapDown,
+      onTapUp: _onTapUp,
+      onLongPress: _onLongPress,
+      onPanStart: _onPanStart,
+      onPanUpdate: _onPanUpdate,
+      onPanEnd: _onPanEnd,
+      child: Texture(textureId: _textureId!),
+    );
+  }
+
+  // ============================================
+  // Touch Handlers
+  // ============================================
+  
+  Offset _localToVirtualDisplay(Offset local, Size viewSize) {
+    if (_virtualDisplayWidth == 0 || _virtualDisplayHeight == 0) {
+      return local;
+    }
+    final scaleX = _virtualDisplayWidth / viewSize.width;
+    final scaleY = _virtualDisplayHeight / viewSize.height;
+    return Offset(local.dx * scaleX, local.dy * scaleY);
+  }
+
+  void _onTapDown(TapDownDetails details) {
+    // 컨트롤 표시
+    _showControlsTemporarily();
+  }
+
+  void _onTapUp(TapUpDetails details) {
+    if (_virtualDisplayId == null) return;
+    
+    final renderBox = context.findRenderObject() as RenderBox?;
+    if (renderBox == null) return;
+    
+    final viewSize = renderBox.size;
+    final vdPos = _localToVirtualDisplay(details.localPosition, viewSize);
+    
+    print("Tap at VD(${vdPos.dx.toInt()}, ${vdPos.dy.toInt()}) on display $_virtualDisplayId");
+    
+    NativeService.injectTap(
+      _virtualDisplayId!,
+      vdPos.dx.toInt(),
+      vdPos.dy.toInt(),
+    );
+  }
+
+  void _onLongPress() {
+    if (_virtualDisplayId == null || _panStartPosition == null) return;
+    
+    final renderBox = context.findRenderObject() as RenderBox?;
+    if (renderBox == null) return;
+    
+    final viewSize = renderBox.size;
+    final vdPos = _localToVirtualDisplay(_panStartPosition!, viewSize);
+    
+    print("Long press at VD(${vdPos.dx.toInt()}, ${vdPos.dy.toInt()})");
+    
+    NativeService.injectLongPress(
+      _virtualDisplayId!,
+      vdPos.dx.toInt(),
+      vdPos.dy.toInt(),
+    );
+  }
+
+  void _onPanStart(DragStartDetails details) {
+    _panStartPosition = details.localPosition;
+    _panStartTime = DateTime.now();
+  }
+
+  void _onPanUpdate(DragUpdateDetails details) {
+    // 실시간 드래그는 너무 많은 명령을 발생시키므로 생략
+    // 필요시 throttle 적용 가능
+  }
+
+  void _onPanEnd(DragEndDetails details) {
+    if (_virtualDisplayId == null || _panStartPosition == null) return;
+    
+    final renderBox = context.findRenderObject() as RenderBox?;
+    if (renderBox == null) return;
+    
+    final viewSize = renderBox.size;
+    final startVd = _localToVirtualDisplay(_panStartPosition!, viewSize);
+    
+    // velocity에서 종료 위치 계산
+    final velocity = details.velocity.pixelsPerSecond;
+    final duration = DateTime.now().difference(_panStartTime!).inMilliseconds;
+    final endLocal = _panStartPosition! + Offset(
+      velocity.dx * duration / 1000 * 0.1,
+      velocity.dy * duration / 1000 * 0.1,
+    );
+    final endVd = _localToVirtualDisplay(endLocal, viewSize);
+    
+    // 최소 이동 거리 체크 (10px)
+    final distance = (endVd - startVd).distance;
+    if (distance < 10) {
+      _panStartPosition = null;
+      _panStartTime = null;
+      return;
+    }
+    
+    print("Swipe from VD(${startVd.dx.toInt()}, ${startVd.dy.toInt()}) to (${endVd.dx.toInt()}, ${endVd.dy.toInt()})");
+    
+    NativeService.injectSwipe(
+      _virtualDisplayId!,
+      startVd.dx.toInt(),
+      startVd.dy.toInt(),
+      endVd.dx.toInt(),
+      endVd.dy.toInt(),
+      300, // 스와이프 duration
+    );
+    
+    _panStartPosition = null;
+    _panStartTime = null;
+  }
+
+  void _showControlsTemporarily() {
+    setState(() => _showControls = true);
+    _controlsTimer?.cancel();
+    _controlsTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted) setState(() => _showControls = false);
+    });
+  }
+
+  @override
+  void dispose() {
+    _controlsTimer?.cancel();
+    super.dispose();
   }
 }
