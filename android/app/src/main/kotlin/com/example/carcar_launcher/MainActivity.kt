@@ -26,6 +26,8 @@ class MainActivity : FlutterActivity() {
     private val TAG = "CarrotPlay"
     private lateinit var virtualDisplayManager: VirtualDisplayManager
     private lateinit var launcherApps: LauncherApps
+    private lateinit var taskManager: TaskManager
+    private var useSystemApi = false // 시스템 API 사용 가능 여부
     private val handler = Handler(Looper.getMainLooper())
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -137,11 +139,34 @@ class MainActivity : FlutterActivity() {
         // Initialize LauncherApps
         launcherApps = getSystemService(LAUNCHER_APPS_SERVICE) as LauncherApps
         
-        // Request Root Permission on startup
+        // Initialize TaskManager (시스템 API 방식)
+        taskManager = TaskManager(context)
+        
+        // 시스템 API 사용 가능 여부 확인 및 TaskStackListener 등록
         Thread {
+            try {
+                taskManager.startListening()
+                useSystemApi = true
+                Log.i(TAG, "System API mode enabled (TaskStackListener registered)")
+            } catch (e: Exception) {
+                Log.w(TAG, "System API not available, falling back to Root mode: ${e.message}")
+                useSystemApi = false
+            }
+            
+            // Root 권한도 확인 (fallback용)
             val hasRoot = RootUtils.requestRoot()
             Log.i(TAG, "Root permission available: $hasRoot")
         }.start()
+        
+        // TaskManager 콜백 설정
+        taskManager.onAppChanged = { displayId, packageName ->
+            Log.d(TAG, "App changed on display $displayId: $packageName")
+            // Flutter에 알림 (필요시)
+        }
+        taskManager.onAppClosed = { displayId ->
+            Log.d(TAG, "App closed on display $displayId")
+            // Flutter에 알림 (필요시)
+        }
         
         virtualDisplayManager = VirtualDisplayManager(context)
 
@@ -197,11 +222,18 @@ class MainActivity : FlutterActivity() {
                         val packageName = call.argument<String>("packageName")
                         val displayId = call.argument<Int>("displayId")
 
-                        Log.d(TAG, "Launching app: $packageName on display $displayId")
+                        Log.d(TAG, "Launching app: $packageName on display $displayId (useSystemApi=$useSystemApi)")
 
                         if (packageName != null && displayId != null) {
-                            launchAppInDisplay(packageName, displayId)
-                            result.success(true)
+                            if (useSystemApi) {
+                                // 시스템 API 방식 (원본 앱과 동일)
+                                val success = taskManager.launchAppOnDisplay(packageName, displayId)
+                                result.success(success)
+                            } else {
+                                // Root fallback 방식
+                                launchAppInDisplay(packageName, displayId)
+                                result.success(true)
+                            }
                         } else {
                             Log.e(TAG, "Missing package name or display ID")
                             result.error("INVALID_ARGS", "Package name or display ID missing", null)
@@ -271,7 +303,11 @@ class MainActivity : FlutterActivity() {
                     val packageName = call.argument<String>("packageName")
                     if (packageName != null) {
                         Thread {
-                            val success = forceStopApp(packageName)
+                            val success = if (useSystemApi) {
+                                taskManager.forceStopApp(packageName)
+                            } else {
+                                forceStopApp(packageName)
+                            }
                             runOnUiThread { result.success(success) }
                         }.start()
                     } else {
@@ -554,5 +590,14 @@ class MainActivity : FlutterActivity() {
             Log.e(TAG, "Move to main display failed: ${result.error}")
         }
         return result.success
+    }
+    
+    override fun onDestroy() {
+        super.onDestroy()
+        // TaskManager 정리
+        if (::taskManager.isInitialized) {
+            taskManager.destroy()
+        }
+        Log.d(TAG, "MainActivity onDestroy - TaskManager destroyed")
     }
 }

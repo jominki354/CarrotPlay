@@ -1,5 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     android:sharedUserId="android.uid.system">
+    <!-- 
+    Note: android:sharedUserId="android.uid.system" 은 AOSP 테스트 키로 서명 시에만 사용
+    삼성 등 제조사 기기에서는 제거해야 함. 일반 기기 테스트 시 위 sharedUserId 라인을 주석 처리하세요.
+    -->
     
     <!-- Basic permissions -->
     <uses-permission android:name="android.permission.INTERNET"/>

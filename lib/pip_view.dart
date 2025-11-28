@@ -36,7 +36,7 @@ class _PipViewState extends State<PipView> {
   
   // 스와이프 감지
   Offset? _panStartPosition;
-  DateTime? _panStartTime;
+  Offset? _panLastPosition;
 
   @override
   void initState() {
@@ -448,45 +448,41 @@ class _PipViewState extends State<PipView> {
       vdPos.dx.toInt(),
       vdPos.dy.toInt(),
     );
+    
+    // Long press 후에는 pan 취소
+    _panStartPosition = null;
+    _panLastPosition = null;
   }
 
   void _onPanStart(DragStartDetails details) {
     _panStartPosition = details.localPosition;
-    _panStartTime = DateTime.now();
+    _panLastPosition = details.localPosition;
   }
 
   void _onPanUpdate(DragUpdateDetails details) {
-    // 실시간 드래그는 너무 많은 명령을 발생시키므로 생략
-    // 필요시 throttle 적용 가능
+    // 마지막 위치 추적
+    _panLastPosition = details.localPosition;
   }
 
   void _onPanEnd(DragEndDetails details) {
-    if (_virtualDisplayId == null || _panStartPosition == null) return;
+    if (_virtualDisplayId == null || _panStartPosition == null || _panLastPosition == null) return;
     
     final renderBox = context.findRenderObject() as RenderBox?;
     if (renderBox == null) return;
     
     final viewSize = renderBox.size;
     final startVd = _localToVirtualDisplay(_panStartPosition!, viewSize);
+    final endVd = _localToVirtualDisplay(_panLastPosition!, viewSize);
     
-    // velocity에서 종료 위치 계산
-    final velocity = details.velocity.pixelsPerSecond;
-    final duration = DateTime.now().difference(_panStartTime!).inMilliseconds;
-    final endLocal = _panStartPosition! + Offset(
-      velocity.dx * duration / 1000 * 0.1,
-      velocity.dy * duration / 1000 * 0.1,
-    );
-    final endVd = _localToVirtualDisplay(endLocal, viewSize);
-    
-    // 최소 이동 거리 체크 (10px)
+    // 최소 이동 거리 체크 (20px)
     final distance = (endVd - startVd).distance;
-    if (distance < 10) {
+    if (distance < 20) {
       _panStartPosition = null;
-      _panStartTime = null;
+      _panLastPosition = null;
       return;
     }
     
-    print("Swipe from VD(${startVd.dx.toInt()}, ${startVd.dy.toInt()}) to (${endVd.dx.toInt()}, ${endVd.dy.toInt()})");
+    print("Swipe from VD(${startVd.dx.toInt()}, ${startVd.dy.toInt()}) to (${endVd.dx.toInt()}, ${endVd.dy.toInt()}) distance=$distance");
     
     NativeService.injectSwipe(
       _virtualDisplayId!,
@@ -498,7 +494,7 @@ class _PipViewState extends State<PipView> {
     );
     
     _panStartPosition = null;
-    _panStartTime = null;
+    _panLastPosition = null;
   }
 
   void _showControlsTemporarily() {
