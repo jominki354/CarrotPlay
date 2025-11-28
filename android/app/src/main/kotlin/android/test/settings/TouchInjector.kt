@@ -72,6 +72,15 @@ object TouchInjector {
     }
     
     /**
+     * VirtualDisplay 크기 변경 후 입력 동기화 (public)
+     * 원본 앱: resize 후 반드시 호출
+     */
+    fun syncAfterResize() {
+        Log.d(TAG, "syncAfterResize called")
+        syncInput()
+    }
+    
+    /**
      * MotionEvent 주입 (내부 헬퍼)
      */
     private fun inject(event: MotionEvent): Boolean {
@@ -161,8 +170,11 @@ object TouchInjector {
             
             val actionMasked = motionEvent.actionMasked
             
-            // 원본 앱 로직 (z7/q.java): 
-            // MOVE 전 sync는 성능에 영향 → UP 후에만 sync (최적화)
+            // 성능 최적화 (Option A):
+            // - MOVE 전 sync 제거 → IPC 호출 90% 감소
+            // - UP/CANCEL 후에만 sync → 최종 상태 동기화
+            // - 고정 레이아웃에서는 터치 정확도 영향 없음
+            // - 나중에 크기/위치 조절 기능 추가 시 resize() 후 sync 1회 추가 예정
             val needsSyncAfter = actionMasked == MotionEvent.ACTION_UP ||
                                  actionMasked == MotionEvent.ACTION_POINTER_UP ||
                                  actionMasked == MotionEvent.ACTION_CANCEL ||

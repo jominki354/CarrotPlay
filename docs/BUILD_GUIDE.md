@@ -12,6 +12,14 @@ CarrotPlay는 Android 시스템 앱으로 빌드됩니다. `android.uid.system` 
 - Java 17 (JDK)
 - AOSP 플랫폼 키 (`platform.p12`)
 
+### 개발 환경 경로
+```
+Flutter SDK: C:\flutter
+Android SDK: C:\Users\jomin\AppData\Local\Android\sdk
+Build Tools: C:\Users\jomin\AppData\Local\Android\sdk\build-tools\35.0.0
+AOSP Keys: D:\nMirror\tools\aosp_keys\platform.p12
+```
+
 ### 키 파일 위치
 ```
 D:\nMirror\tools\aosp_keys\platform.p12
@@ -36,8 +44,8 @@ D:\nMirror\tools\aosp_keys\platform.p12
 
 ```powershell
 cd D:\nMirror\carcar_launcher
-flutter clean
-flutter build apk --debug
+C:\flutter\bin\flutter clean
+C:\flutter\bin\flutter build apk --debug
 ```
 
 ### 2. 플랫폼 키로 서명
@@ -70,7 +78,7 @@ adb install "build\app\outputs\flutter-apk\carcar-signed.apk"
 cd D:\nMirror\carcar_launcher
 
 # 빌드
-flutter build apk --debug
+C:\flutter\bin\flutter build apk --debug
 
 # 서명
 $APKSIGNER = "C:\Users\jomin\AppData\Local\Android\sdk\build-tools\35.0.0\apksigner.bat"

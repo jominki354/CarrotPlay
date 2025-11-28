@@ -234,6 +234,23 @@ class NativeService {
     }
   }
 
+  /// 가상 디스플레이 크기/DPI 조절 (원본 앱 방식)
+  static Future<bool> resizeVirtualDisplay(int displayId, int width, int height, int density) async {
+    try {
+      print("NativeService: Resizing VirtualDisplay $displayId to ${width}x$height @ ${density}dpi");
+      final result = await _channel.invokeMethod('resizeVirtualDisplay', {
+        'displayId': displayId,
+        'width': width,
+        'height': height,
+        'density': density,
+      });
+      return result == true;
+    } catch (e) {
+      print("NativeService: Error resizing virtual display: $e");
+      return false;
+    }
+  }
+
   /// 가상 디스플레이 해제
   static Future<bool> releaseVirtualDisplay(int displayId) async {
     try {
@@ -245,6 +262,19 @@ class NativeService {
     } catch (e) {
       print("NativeService: Error releasing virtual display: $e");
       return false;
+    }
+  }
+  
+  /// 디스플레이에서 실행 중인 앱 확인
+  static Future<String?> getTopActivity(int displayId) async {
+    try {
+      final result = await _channel.invokeMethod('getTopActivity', {
+        'displayId': displayId,
+      });
+      return result as String?;
+    } catch (e) {
+      // 에러 무시
+      return null;
     }
   }
 }

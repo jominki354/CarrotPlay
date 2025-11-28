@@ -477,6 +477,102 @@ class TaskManager(private val context: Context) {
         }
     }
     
+    /**
+     * 메인 디스플레이에 전체화면으로 앱 실행 + 포커스 설정
+     * 원본 앱(z7/m.java n() + z7/l.java f())와 동일한 방식
+     */
+    fun launchAppOnMainDisplayFullscreen(packageName: String, mainDisplayId: Int): Boolean {
+        Log.i(TAG, "launchAppOnMainDisplayFullscreen: $packageName on main display $mainDisplayId")
+        
+        // 1. 이미 실행 중인 Task가 있는지 확인
+        val existingTask = findTaskByPackage(packageName)
+        if (existingTask != null) {
+            val taskDisplayId = getTaskDisplayId(existingTask)
+            if (taskDisplayId == mainDisplayId) {
+                val visible = getTaskVisibility(existingTask)
+                val taskId = getTaskId(existingTask)
+                if (!visible) {
+                    // 보이지 않으면 포커스만 이동
+                    setFocusedRootTask(taskId)
+                    Log.d(TAG, "Set focus to existing task $taskId")
+                } else {
+                    // 이미 보이면 포커스 이동
+                    setFocusedRootTask(taskId)
+                }
+                return true
+            }
+        }
+        
+        // 2. 메인 디스플레이에서 실행 시 pending에 추가 (원본 앱 방식)
+        // TaskStackListener 콜백에서 setFocusedRootTask() 호출됨
+        pendingLaunches[mainDisplayId] = packageName
+        removePackageFromDisplays(packageName) // 다른 디스플레이에서 제거
+        
+        // 3. Launcher Activity 찾기
+        val activityList = launcherApps.getActivityList(packageName, Process.myUserHandle())
+        if (activityList.isNullOrEmpty()) {
+            Log.e(TAG, "No launcher activity found for $packageName")
+            pendingLaunches.remove(mainDisplayId)
+            return false
+        }
+        
+        val componentName = activityList[0].componentName
+        
+        // 4. Intent 생성 (원본 앱과 동일한 플래그)
+        val intent = Intent(Intent.ACTION_MAIN).apply {
+            addCategory(Intent.CATEGORY_LAUNCHER)
+            component = componentName
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)        // 268435456
+            addFlags(Intent.FLAG_ACTIVITY_MULTIPLE_TASK)   // 2097152  
+            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)       // 65536
+            addFlags(Intent.FLAG_ACTIVITY_LAUNCH_ADJACENT) // 131072
+        }
+        
+        // 5. ActivityOptions 설정
+        val options = ActivityOptions.makeBasic()
+        options.launchDisplayId = mainDisplayId
+        
+        try {
+            val setWindowingModeMethod = ActivityOptions::class.java.getDeclaredMethod(
+                "setLaunchWindowingMode",
+                Int::class.javaPrimitiveType
+            )
+            setWindowingModeMethod.invoke(options, 1) // WINDOWING_MODE_FULLSCREEN
+            Log.d(TAG, "setLaunchWindowingMode(1) success")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to set windowing mode: ${e.message}")
+        }
+        
+        // 6. PendingIntent로 실행 (원본 앱과 동일한 방식)
+        return try {
+            val pendingIntent = PendingIntent.getActivity(
+                context,
+                0,
+                intent,
+                201326592 // FLAG_UPDATE_CURRENT | FLAG_IMMUTABLE
+            )
+            
+            pendingIntent.send(null, 0, null, null, null, null, options.toBundle())
+            Log.i(TAG, "✓ App launch initiated: $packageName (fullscreen on main display)")
+            
+            // 7. 잠시 후 강제 포커스 설정 (콜백이 안 올 경우 대비)
+            mainHandler.postDelayed({
+                val task = findTaskByPackage(packageName)
+                if (task != null) {
+                    val taskId = getTaskId(task)
+                    setFocusedRootTask(taskId)
+                    Log.d(TAG, "Delayed focus set to task $taskId")
+                }
+            }, 500)
+            
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to launch app fullscreen", e)
+            pendingLaunches.remove(mainDisplayId)
+            false
+        }
+    }
+    
     fun forceStopApp(packageName: String): Boolean {
         return try {
             val method = activityManager?.javaClass?.getDeclaredMethod(
@@ -511,6 +607,30 @@ class TaskManager(private val context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to unregister TaskStackListener", e)
         }
+    }
+    
+    /**
+     * 특정 디스플레이에서 실행 중인 최상위 앱의 패키지명 반환
+     */
+    fun getTopActivity(displayId: Int): String? {
+        try {
+            val allTasks = getAllRootTaskInfos() ?: return null
+            
+            for (taskInfo in allTasks) {
+                val taskDisplayId = getTaskDisplayId(taskInfo)
+                val visible = getTaskVisibility(taskInfo)
+                
+                if (taskDisplayId == displayId && visible) {
+                    val component = getTaskComponent(taskInfo)
+                    if (component != null) {
+                        return component.packageName
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to get top activity on display $displayId", e)
+        }
+        return null
     }
     
     private fun removePackageFromDisplays(packageName: String) {

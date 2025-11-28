@@ -228,9 +228,10 @@ class MainActivity : FlutterActivity() {
                         surfaceTexture.setDefaultBufferSize(width, height)
                         val surface = Surface(surfaceTexture)
 
-                        val flags = DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or 
-                                   DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY or
-                                   DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
+                        // 원본 앱과 동일한 플래그: 1289 (0x509)
+                        // PUBLIC(1) | OWN_CONTENT_ONLY(8) | SUPPORTS_TOUCH(0x100) | TRUSTED(0x400)
+                        // TRUSTED 플래그가 없으면 시스템이 VirtualDisplay에서 앱 실행을 거부할 수 있음
+                        val flags = 1289
                         val virtualDisplay = virtualDisplayManager.createVirtualDisplay(
                             "CarCarVD-${System.currentTimeMillis()}",
                             width,
@@ -421,6 +422,53 @@ class MainActivity : FlutterActivity() {
                         result.error("INVALID_ARGS", "Package name required", null)
                     }
                 }
+                // ============================================
+                // 전체화면 앱 실행 (메인 디스플레이에서 전체화면 모드)
+                // ============================================
+                "launchAppFullscreen" -> {
+                    val packageName = call.argument<String>("packageName")
+                    if (packageName != null) {
+                        Thread {
+                            val success = launchAppFullscreen(packageName)
+                            runOnUiThread { result.success(success) }
+                        }.start()
+                    } else {
+                        result.error("INVALID_ARGS", "Package name required", null)
+                    }
+                }
+                "resizeVirtualDisplay" -> {
+                    val displayId = call.argument<Int>("displayId")
+                    val width = call.argument<Int>("width")
+                    val height = call.argument<Int>("height")
+                    val density = call.argument<Int>("density")
+                    
+                    if (displayId != null && width != null && height != null && density != null) {
+                        try {
+                            Log.d(TAG, "Resizing VirtualDisplay $displayId to ${width}x$height @ ${density}dpi")
+                            
+                            // 1. SurfaceTexture 크기 조절
+                            val textureEntry = textureEntries[displayId]
+                            if (textureEntry != null) {
+                                textureEntry.surfaceTexture().setDefaultBufferSize(width, height)
+                            }
+                            
+                            // 2. VirtualDisplay 크기/DPI 조절
+                            val success = virtualDisplayManager.resizeVirtualDisplay(displayId, width, height, density)
+                            
+                            // 3. 입력 트랜잭션 동기화 (resize 후 필수)
+                            if (success && TouchInjector.isAvailable()) {
+                                TouchInjector.syncAfterResize()
+                            }
+                            
+                            result.success(success)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Exception resizing VirtualDisplay", e)
+                            result.error("RESIZE_EXCEPTION", e.message, e.toString())
+                        }
+                    } else {
+                        result.error("INVALID_ARGS", "displayId, width, height, density required", null)
+                    }
+                }
                 "releaseVirtualDisplay" -> {
                     val displayId = call.argument<Int>("displayId")
                     if (displayId != null) {
@@ -429,6 +477,19 @@ class MainActivity : FlutterActivity() {
                         result.success(true)
                     } else {
                         result.error("INVALID_ARGS", "Display ID required", null)
+                    }
+                }
+                "getTopActivity" -> {
+                    val displayId = call.argument<Int>("displayId")
+                    if (displayId != null) {
+                        try {
+                            val topActivity = taskManager.getTopActivity(displayId)
+                            result.success(topActivity)
+                        } catch (e: Exception) {
+                            result.success(null)
+                        }
+                    } else {
+                        result.success(null)
                     }
                 }
                 else -> {
@@ -441,17 +502,47 @@ class MainActivity : FlutterActivity() {
         Log.d(TAG, "Flutter Engine configured successfully")
     }
 
-    private fun getInstalledApps(): List<Map<String, Any>> {
-        val apps = mutableListOf<Map<String, Any>>()
+    private fun getInstalledApps(): List<Map<String, Any?>> {
+        val apps = mutableListOf<Map<String, Any?>>()
         val packageManager = context.packageManager
         
         try {
             val packages = packageManager.getInstalledApplications(android.content.pm.PackageManager.GET_META_DATA)
             for (appInfo in packages) {
                 if (packageManager.getLaunchIntentForPackage(appInfo.packageName) != null) {
-                    val app = mapOf(
+                    // 앱 아이콘을 ByteArray로 변환
+                    var iconBytes: ByteArray? = null
+                    try {
+                        val drawable = packageManager.getApplicationIcon(appInfo)
+                        val bitmap = if (drawable is android.graphics.drawable.BitmapDrawable) {
+                            drawable.bitmap
+                        } else {
+                            // AdaptiveIconDrawable 등 다른 타입 처리
+                            val width = drawable.intrinsicWidth.coerceAtLeast(1)
+                            val height = drawable.intrinsicHeight.coerceAtLeast(1)
+                            val bmp = android.graphics.Bitmap.createBitmap(
+                                width.coerceAtMost(128), 
+                                height.coerceAtMost(128), 
+                                android.graphics.Bitmap.Config.ARGB_8888
+                            )
+                            val canvas = android.graphics.Canvas(bmp)
+                            drawable.setBounds(0, 0, canvas.width, canvas.height)
+                            drawable.draw(canvas)
+                            bmp
+                        }
+                        
+                        // Bitmap을 PNG byte array로 변환
+                        val stream = java.io.ByteArrayOutputStream()
+                        bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, stream)
+                        iconBytes = stream.toByteArray()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to get icon for ${appInfo.packageName}: ${e.message}")
+                    }
+                    
+                    val app = mapOf<String, Any?>(
                         "packageName" to appInfo.packageName,
-                        "appName" to packageManager.getApplicationLabel(appInfo).toString()
+                        "appName" to packageManager.getApplicationLabel(appInfo).toString(),
+                        "icon" to iconBytes
                     )
                     apps.add(app)
                 }
@@ -696,6 +787,89 @@ class MainActivity : FlutterActivity() {
             Log.e(TAG, "Move to main display failed: ${result.error}")
         }
         return result.success
+    }
+    
+    /**
+     * 앱을 메인 디스플레이에서 전체화면(FULLSCREEN) 모드로 실행합니다.
+     * 원본 앱(z7/m.java + z7/l.java)과 동일한 방식:
+     * - displayId = context.getDisplayId() (메인 디스플레이 = 0)
+     * - setLaunchWindowingMode(1) = WINDOWING_MODE_FULLSCREEN
+     * - TaskStackListener를 통해 setFocusedRootTask() 호출로 포커스 이동
+     */
+    private fun launchAppFullscreen(packageName: String): Boolean {
+        Log.i(TAG, "========== launchAppFullscreen START ==========")
+        Log.i(TAG, "Package: $packageName")
+        
+        // 메인 디스플레이 ID (원본 앱: context.getDisplayId())
+        val mainDisplayId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display?.displayId ?: 0
+        } else {
+            0
+        }
+        Log.d(TAG, "Main display ID: $mainDisplayId")
+        
+        // 원본 앱(z7/m.java n() 메서드)과 동일한 흐름:
+        // 1. 시스템 API 사용 시 TaskManager 통해 실행 + 포커스 설정
+        if (useSystemApi) {
+            try {
+                // TaskManager에 실행 요청 (내부적으로 pendingLaunches에 저장)
+                // TaskStackListener 콜백에서 setFocusedRootTask() 호출됨
+                val success = taskManager.launchAppOnMainDisplayFullscreen(packageName, mainDisplayId)
+                if (success) {
+                    Log.i(TAG, "✓ Launched via System API + TaskManager")
+                    Log.i(TAG, "========== launchAppFullscreen END (SUCCESS) ==========")
+                    return true
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "System API launch failed: ${e.message}")
+            }
+        }
+        
+        // 2. ROOT Shell fallback (가장 신뢰성 높음)
+        try {
+            Log.d(TAG, "Strategy: ROOT shell launch for fullscreen")
+            
+            // Launcher activity 가져오기
+            var componentName: android.content.ComponentName? = null
+            try {
+                val activities = launcherApps.getActivityList(packageName, android.os.Process.myUserHandle())
+                if (activities != null && activities.isNotEmpty()) {
+                    componentName = activities[0].componentName
+                }
+            } catch (e: Exception) {
+                val launchIntent = context.packageManager.getLaunchIntentForPackage(packageName)
+                componentName = launchIntent?.component
+            }
+            
+            if (componentName == null) {
+                Log.e(TAG, "Failed to get component name for $packageName")
+                return false
+            }
+            
+            val componentString = componentName.flattenToShortString()
+            val escapedComponent = componentString.replace("$", "\\$")
+            
+            // am start --display 0 --windowingMode 1 (FULLSCREEN)
+            // -W: wait for launch to complete (포커스 보장)
+            val cmd = "am start -W -n \"$escapedComponent\" --display $mainDisplayId --windowingMode 1 " +
+                      "-f ${Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_MULTIPLE_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP}"
+            Log.i(TAG, "Executing ROOT command: $cmd")
+            
+            val result = RootUtils.executeCommand(cmd)
+            
+            if (result.success) {
+                Log.i(TAG, "✓ Launched fullscreen via ROOT shell")
+                Log.i(TAG, "========== launchAppFullscreen END (SUCCESS via ROOT) ==========")
+                return true
+            } else {
+                Log.w(TAG, "✗ ROOT launch failed: ${result.error}")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "✗ ROOT shell launch failed", e)
+        }
+        
+        Log.e(TAG, "========== launchAppFullscreen END (FAILED) ==========")
+        return false
     }
     
     override fun onDestroy() {
