@@ -4,6 +4,7 @@ import 'native_service.dart';
 import 'app_selection_screen.dart';
 import 'package:get/get.dart';
 import 'dart:async';
+import 'dart:math' as math;
 
 class PipView extends StatefulWidget {
   final int displayId; // Logical ID for our app (1 or 2)
@@ -34,9 +35,18 @@ class _PipViewState extends State<PipView> {
   int _virtualDisplayWidth = 0;
   int _virtualDisplayHeight = 0;
   
-  // 스와이프 감지
-  Offset? _panStartPosition;
-  Offset? _panLastPosition;
+  // 실시간 터치 추적 (원본 앱 방식)
+  bool _isPointerDown = false;
+  Offset? _currentPointerPosition; // 현재 터치 위치
+  
+  // 터치 포인터 시각화용 - 꼬리 궤적
+  final List<Offset> _pointerTrail = [];
+  static const int _maxTrailLength = 15;
+  
+  // 성능 최적화: RenderBox 캐싱, MOVE throttle
+  Size? _cachedViewSize;
+  int _lastMoveTime = 0;
+  static const int _moveThrottleMs = 4; // ~250fps 제한
 
   @override
   void initState() {
@@ -204,13 +214,13 @@ class _PipViewState extends State<PipView> {
             ),
           ),
           
-          // App Control Bar (터치 시 표시)
+          // App Control Bar (터치 시 표시) - 중앙 정렬
           if (_showControls && _currentPackage != null)
             Positioned(
               bottom: 16,
-              left: 16,
-              right: 80,
-              child: _buildControlBar(),
+              left: 0,
+              right: 0,
+              child: Center(child: _buildControlBar()),
             ),
           
           // Info Label
@@ -252,13 +262,14 @@ class _PipViewState extends State<PipView> {
 
   Widget _buildControlBar() {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
       decoration: BoxDecoration(
         color: Colors.black87,
         borderRadius: BorderRadius.circular(24),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
           // Back 버튼
           IconButton(
@@ -272,7 +283,7 @@ class _PipViewState extends State<PipView> {
             padding: const EdgeInsets.all(8),
             constraints: const BoxConstraints(),
           ),
-          const SizedBox(width: 8),
+          const SizedBox(width: 12),
           // Home 버튼
           IconButton(
             icon: const Icon(Icons.home, color: Colors.white, size: 20),
@@ -285,7 +296,7 @@ class _PipViewState extends State<PipView> {
             padding: const EdgeInsets.all(8),
             constraints: const BoxConstraints(),
           ),
-          const SizedBox(width: 8),
+          const SizedBox(width: 12),
           // Recent 버튼
           IconButton(
             icon: const Icon(Icons.layers, color: Colors.white, size: 20),
@@ -295,36 +306,6 @@ class _PipViewState extends State<PipView> {
               }
             },
             tooltip: "Recent Apps",
-            padding: const EdgeInsets.all(8),
-            constraints: const BoxConstraints(),
-          ),
-          const SizedBox(width: 8),
-          // 전체화면 버튼
-          IconButton(
-            icon: const Icon(Icons.fullscreen, color: Colors.white, size: 20),
-            onPressed: () {
-              if (_currentPackage != null) {
-                NativeService.moveToMainDisplay(_currentPackage!);
-              }
-            },
-            tooltip: "Fullscreen",
-            padding: const EdgeInsets.all(8),
-            constraints: const BoxConstraints(),
-          ),
-          const SizedBox(width: 8),
-          // 앱 종료 버튼
-          IconButton(
-            icon: const Icon(Icons.close, color: Colors.redAccent, size: 20),
-            onPressed: () async {
-              if (_currentPackage != null) {
-                await NativeService.forceStopApp(_currentPackage!);
-                setState(() {
-                  _currentPackage = null;
-                  _currentAppName = null;
-                });
-              }
-            },
-            tooltip: "Close App",
             padding: const EdgeInsets.all(8),
             constraints: const BoxConstraints(),
           ),
@@ -383,21 +364,39 @@ class _PipViewState extends State<PipView> {
       );
     }
 
-    // 터치 가능한 Texture 뷰
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTapDown: _onTapDown,
-      onTapUp: _onTapUp,
-      onLongPress: _onLongPress,
-      onPanStart: _onPanStart,
-      onPanUpdate: _onPanUpdate,
-      onPanEnd: _onPanEnd,
-      child: Texture(textureId: _textureId!),
+    // 터치 가능한 Texture 뷰 - Listener로 실시간 이벤트 처리 (원본 앱 방식)
+    return Stack(
+      children: [
+        // Texture 뷰
+        Positioned.fill(
+          child: Listener(
+            behavior: HitTestBehavior.opaque,
+            onPointerDown: _onPointerDown,
+            onPointerMove: _onPointerMove,
+            onPointerUp: _onPointerUp,
+            onPointerCancel: _onPointerCancel,
+            child: Texture(textureId: _textureId!),
+          ),
+        ),
+        
+        // 터치 포인터 시각화 오버레이
+        if (_isPointerDown && _currentPointerPosition != null)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: CustomPaint(
+                painter: TouchPointerPainter(
+                  position: _currentPointerPosition!,
+                  trail: List.from(_pointerTrail),
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 
   // ============================================
-  // Touch Handlers
+  // Real-time Touch Handlers (원본 앱 방식)
   // ============================================
   
   Offset _localToVirtualDisplay(Offset local, Size viewSize) {
@@ -409,92 +408,114 @@ class _PipViewState extends State<PipView> {
     return Offset(local.dx * scaleX, local.dy * scaleY);
   }
 
-  void _onTapDown(TapDownDetails details) {
-    // 컨트롤 표시
-    _showControlsTemporarily();
-  }
-
-  void _onTapUp(TapUpDetails details) {
+  void _onPointerDown(PointerDownEvent event) {
     if (_virtualDisplayId == null) return;
     
+    // RenderBox 캐싱
     final renderBox = context.findRenderObject() as RenderBox?;
     if (renderBox == null) return;
+    _cachedViewSize = renderBox.size;
     
-    final viewSize = renderBox.size;
-    final vdPos = _localToVirtualDisplay(details.localPosition, viewSize);
+    final vdPos = _localToVirtualDisplay(event.localPosition, _cachedViewSize!);
     
-    print("Tap at VD(${vdPos.dx.toInt()}, ${vdPos.dy.toInt()}) on display $_virtualDisplayId");
+    setState(() {
+      _isPointerDown = true;
+      _currentPointerPosition = event.localPosition;
+      _pointerTrail.clear();
+      _pointerTrail.add(event.localPosition);
+    });
     
-    NativeService.injectTap(
+    // 컨트롤 표시
+    _showControlsTemporarily();
+    
+    // ACTION_DOWN 즉시 전송 (fire-and-forget, await 안 함)
+    NativeService.injectMotionEvent(
       _virtualDisplayId!,
-      vdPos.dx.toInt(),
-      vdPos.dy.toInt(),
+      0, // ACTION_DOWN
+      vdPos.dx,
+      vdPos.dy,
+      0, // Native에서 관리
+      0,
     );
   }
 
-  void _onLongPress() {
-    if (_virtualDisplayId == null || _panStartPosition == null) return;
+  void _onPointerMove(PointerMoveEvent event) {
+    if (_virtualDisplayId == null || !_isPointerDown || _cachedViewSize == null) return;
     
-    final renderBox = context.findRenderObject() as RenderBox?;
-    if (renderBox == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
     
-    final viewSize = renderBox.size;
-    final vdPos = _localToVirtualDisplay(_panStartPosition!, viewSize);
+    // Throttle: 최소 간격 제한 (과도한 이벤트 방지)
+    if (now - _lastMoveTime < _moveThrottleMs) return;
+    _lastMoveTime = now;
     
-    print("Long press at VD(${vdPos.dx.toInt()}, ${vdPos.dy.toInt()})");
+    final vdPos = _localToVirtualDisplay(event.localPosition, _cachedViewSize!);
     
-    NativeService.injectLongPress(
-      _virtualDisplayId!,
-      vdPos.dx.toInt(),
-      vdPos.dy.toInt(),
-    );
-    
-    // Long press 후에는 pan 취소
-    _panStartPosition = null;
-    _panLastPosition = null;
-  }
-
-  void _onPanStart(DragStartDetails details) {
-    _panStartPosition = details.localPosition;
-    _panLastPosition = details.localPosition;
-  }
-
-  void _onPanUpdate(DragUpdateDetails details) {
-    // 마지막 위치 추적
-    _panLastPosition = details.localPosition;
-  }
-
-  void _onPanEnd(DragEndDetails details) {
-    if (_virtualDisplayId == null || _panStartPosition == null || _panLastPosition == null) return;
-    
-    final renderBox = context.findRenderObject() as RenderBox?;
-    if (renderBox == null) return;
-    
-    final viewSize = renderBox.size;
-    final startVd = _localToVirtualDisplay(_panStartPosition!, viewSize);
-    final endVd = _localToVirtualDisplay(_panLastPosition!, viewSize);
-    
-    // 최소 이동 거리 체크 (20px)
-    final distance = (endVd - startVd).distance;
-    if (distance < 20) {
-      _panStartPosition = null;
-      _panLastPosition = null;
-      return;
+    // 포인터 시각화 업데이트 (setState 없이 직접 수정 후 repaint)
+    _currentPointerPosition = event.localPosition;
+    _pointerTrail.add(event.localPosition);
+    if (_pointerTrail.length > _maxTrailLength) {
+      _pointerTrail.removeAt(0);
     }
+    // CustomPainter만 다시 그리기 (전체 위젯 리빌드 방지)
+    (context as Element).markNeedsBuild();
     
-    print("Swipe from VD(${startVd.dx.toInt()}, ${startVd.dy.toInt()}) to (${endVd.dx.toInt()}, ${endVd.dy.toInt()}) distance=$distance");
-    
-    NativeService.injectSwipe(
+    // ACTION_MOVE 전송 (fire-and-forget)
+    NativeService.injectMotionEvent(
       _virtualDisplayId!,
-      startVd.dx.toInt(),
-      startVd.dy.toInt(),
-      endVd.dx.toInt(),
-      endVd.dy.toInt(),
-      300, // 스와이프 duration
+      2, // ACTION_MOVE
+      vdPos.dx,
+      vdPos.dy,
+      0, // Native에서 관리
+      0,
+    );
+  }
+
+  void _onPointerUp(PointerUpEvent event) {
+    if (_virtualDisplayId == null || !_isPointerDown || _cachedViewSize == null) return;
+    
+    final vdPos = _localToVirtualDisplay(event.localPosition, _cachedViewSize!);
+    
+    // ACTION_UP 전송 (fire-and-forget)
+    NativeService.injectMotionEvent(
+      _virtualDisplayId!,
+      1, // ACTION_UP
+      vdPos.dx,
+      vdPos.dy,
+      0, // Native에서 관리
+      0,
     );
     
-    _panStartPosition = null;
-    _panLastPosition = null;
+    setState(() {
+      _isPointerDown = false;
+      _currentPointerPosition = null;
+      _pointerTrail.clear();
+    });
+    
+    _cachedViewSize = null;
+  }
+
+  void _onPointerCancel(PointerCancelEvent event) {
+    if (_virtualDisplayId == null || !_isPointerDown || _cachedViewSize == null) return;
+    
+    final vdPos = _localToVirtualDisplay(event.localPosition, _cachedViewSize!);
+    
+    // ACTION_CANCEL 전송 (fire-and-forget)
+    NativeService.injectMotionEvent(
+      _virtualDisplayId!,
+      3, // ACTION_CANCEL
+      vdPos.dx,
+      vdPos.dy,
+      0, // Native에서 관리
+      0,
+    );
+    
+    setState(() {
+      _isPointerDown = false;
+      _currentPointerPosition = null;
+      _pointerTrail.clear();
+    });
+    
+    _cachedViewSize = null;
   }
 
   void _showControlsTemporarily() {
@@ -508,6 +529,73 @@ class _PipViewState extends State<PipView> {
   @override
   void dispose() {
     _controlsTimer?.cancel();
+    if (_virtualDisplayId != null) {
+      NativeService.releaseVirtualDisplay(_virtualDisplayId!);
+    }
     super.dispose();
+  }
+}
+
+/// 터치 포인터 시각화 Painter (Android 개발자 옵션 스타일)
+/// 원형 + 꼬리 궤적 표시
+class TouchPointerPainter extends CustomPainter {
+  final Offset position;
+  final List<Offset> trail;
+  
+  static const double _circleRadius = 12.0; // 원형 크기 절반으로 축소
+  static const Color _circleColor = Color(0x88FFFFFF);
+  static const Color _circleBorderColor = Color(0xFFFFFFFF);
+  static const Color _trailColor = Color(0x66FFFFFF);
+  
+  TouchPointerPainter({
+    required this.position,
+    required this.trail,
+  });
+  
+  @override
+  void paint(Canvas canvas, Size size) {
+    // 꼬리 궤적 그리기 (점점 투명해지는 선)
+    if (trail.length > 1) {
+      final trailPaint = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 4.0
+        ..strokeCap = StrokeCap.round;
+      
+      for (int i = 1; i < trail.length; i++) {
+        // 투명도: 이전 점일수록 투명
+        final alpha = (i / trail.length * 100).toInt().clamp(20, 100);
+        trailPaint.color = _trailColor.withAlpha(alpha);
+        
+        canvas.drawLine(trail[i - 1], trail[i], trailPaint);
+      }
+    }
+    
+    // 원형 포인터 그리기 (외곽선)
+    final borderPaint = Paint()
+      ..color = _circleBorderColor
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.0;
+    
+    canvas.drawCircle(position, _circleRadius, borderPaint);
+    
+    // 원형 포인터 그리기 (채움)
+    final fillPaint = Paint()
+      ..color = _circleColor
+      ..style = PaintingStyle.fill;
+    
+    canvas.drawCircle(position, _circleRadius, fillPaint);
+    
+    // 중심점 표시 (작은 점)
+    final centerPaint = Paint()
+      ..color = _circleBorderColor
+      ..style = PaintingStyle.fill;
+    
+    canvas.drawCircle(position, 4.0, centerPaint);
+  }
+  
+  @override
+  bool shouldRepaint(covariant TouchPointerPainter oldDelegate) {
+    return position != oldDelegate.position || 
+           trail.length != oldDelegate.trail.length;
   }
 }

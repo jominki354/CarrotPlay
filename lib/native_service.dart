@@ -91,8 +91,27 @@ class NativeService {
   }
 
   // ============================================
-  // Touch Injection (Root 기반)
+  // Touch Injection (System API 우선, Root fallback)
   // ============================================
+  
+  /// 실시간 MotionEvent 주입 (최적화 버전)
+  /// action: 0=DOWN, 1=UP, 2=MOVE, 3=CANCEL
+  static void injectMotionEvent(
+    int displayId,
+    int action,
+    double x,
+    double y,
+    int downTime,
+    int eventTime,
+  ) {
+    // Fire-and-forget: 결과 대기 안 함
+    _channel.invokeMethod('injectMotionEvent', {
+      'displayId': displayId,
+      'action': action,
+      'x': x,
+      'y': y,
+    });
+  }
   
   /// 단일 탭 주입
   static Future<bool> injectTap(int displayId, int x, int y) async {
@@ -127,13 +146,24 @@ class NativeService {
     }
   }
 
-  /// 롱프레스 주입 (같은 좌표로 긴 스와이프)
-  static Future<bool> injectLongPress(int displayId, int x, int y) async {
-    return injectSwipe(displayId, x, y, x, y, 800);
+  /// 롱프레스 주입 (Native에서 처리)
+  static Future<bool> injectLongPress(int displayId, int x, int y, {int durationMs = 800}) async {
+    try {
+      final result = await _channel.invokeMethod('injectLongPress', {
+        'displayId': displayId,
+        'x': x,
+        'y': y,
+        'duration': durationMs,
+      });
+      return result == true;
+    } catch (e) {
+      print("NativeService: Error injecting long press: $e");
+      return false;
+    }
   }
 
   // ============================================
-  // App Control (Root 기반)
+  // App Control
   // ============================================
   
   /// Back 키 전송
@@ -200,6 +230,20 @@ class NativeService {
       return result == true;
     } catch (e) {
       print("NativeService: Error moving app: $e");
+      return false;
+    }
+  }
+
+  /// 가상 디스플레이 해제
+  static Future<bool> releaseVirtualDisplay(int displayId) async {
+    try {
+      print("NativeService: Releasing VirtualDisplay $displayId");
+      final result = await _channel.invokeMethod('releaseVirtualDisplay', {
+        'displayId': displayId,
+      });
+      return result == true;
+    } catch (e) {
+      print("NativeService: Error releasing virtual display: $e");
       return false;
     }
   }
