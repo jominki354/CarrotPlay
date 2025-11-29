@@ -633,6 +633,50 @@ class TaskManager(private val context: Context) {
         return null
     }
     
+    /**
+     * 뒤로가기 가능 여부 확인 (앱 종료 방지)
+     * Task의 Activity 스택이 2개 이상이면 뒤로가기 가능
+     * 1개면 뒤로가기 시 앱이 종료되므로 false 반환
+     */
+    fun canGoBack(displayId: Int): Boolean {
+        try {
+            val allTasks = getAllRootTaskInfos() ?: return true
+            
+            for (taskInfo in allTasks) {
+                val taskDisplayId = getTaskDisplayId(taskInfo)
+                val visible = getTaskVisibility(taskInfo)
+                
+                if (taskDisplayId == displayId && visible) {
+                    // Task의 Activity 스택 크기 확인
+                    val numActivities = getTaskNumActivities(taskInfo)
+                    Log.d(TAG, "canGoBack: display=$displayId, numActivities=$numActivities")
+                    
+                    // Activity가 2개 이상이면 뒤로가기 가능
+                    return numActivities > 1
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to check canGoBack on display $displayId", e)
+        }
+        // 확인 실패 시 기본적으로 허용 (안전한 기본값)
+        return true
+    }
+    
+    /**
+     * Task의 Activity 개수 반환
+     */
+    private fun getTaskNumActivities(taskInfo: Any): Int {
+        return try {
+            // RootTaskInfo.numActivities 또는 TaskInfo.numActivities
+            val numActivitiesField = taskInfo.javaClass.getDeclaredField("numActivities")
+            numActivitiesField.isAccessible = true
+            numActivitiesField.getInt(taskInfo)
+        } catch (e: Exception) {
+            // 실패 시 기본값 2 (안전하게 허용)
+            2
+        }
+    }
+    
     private fun removePackageFromDisplays(packageName: String) {
         val displayId = displayPackageMap.entries.find { it.value == packageName }?.key
         if (displayId != null) {

@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.1] - 2025-11-29
+
+### Fixed
+- PIP 하단 제스쳐바 상태 초기화 문제 수정
+- 제스쳐바 드래그 후 복귀 지연 현상 해결
+- 프리셋 버튼 오버플로우 해결 (Column → Stack → Column 구조 재정리)
+- BouncyButton 터치 인식 개선 (최소 터치 영역 44x44, 반응 속도 향상)
+- Dock 레이아웃 반응형 기준값 조정 (SafeArea 적용 후 실제 높이 기준)
+- 캐리어명 표시 조건 수정 (항상 표시)
+- PIP 앱 종료 방지 로직 추가 (canGoBack 확인)
+
 ## [0.2.0] - 2025-11-28
 
 ### Added

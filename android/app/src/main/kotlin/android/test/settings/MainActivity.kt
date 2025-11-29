@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.LauncherApps
 import android.content.res.Configuration
+import android.graphics.Rect
 import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Bundle
@@ -149,6 +150,10 @@ class MainActivity : FlutterActivity() {
                 controller.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
                 controller.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             }
+            
+            // Gesture Exclusion: 하단 및 좌우 가장자리에서 시스템 제스처 비활성화
+            // Android 10+ (API 29+)
+            setupGestureExclusion()
         } else {
             // Android 10 and below
             @Suppress("DEPRECATION")
@@ -160,6 +165,47 @@ class MainActivity : FlutterActivity() {
                 or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                 or View.SYSTEM_UI_FLAG_FULLSCREEN
             )
+            
+            // Gesture Exclusion for API 29
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                setupGestureExclusion()
+            }
+        }
+    }
+    
+    /**
+     * 시스템 제스처 비활성화 영역 설정
+     * 하단 120px, 좌우 가장자리 40px에서 시스템 Back 제스처 비활성화
+     * 차량용 런처에서 앱 내 제스처와 충돌 방지
+     */
+    private fun setupGestureExclusion() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        
+        window.decorView.post {
+            val decorView = window.decorView
+            val width = decorView.width
+            val height = decorView.height
+            
+            if (width <= 0 || height <= 0) {
+                // 크기가 아직 결정되지 않은 경우 다시 시도
+                handler.postDelayed({ setupGestureExclusion() }, 100)
+                return@post
+            }
+            
+            val exclusionRects = mutableListOf<Rect>()
+            
+            // 하단 120px 전체 영역 (PIP 제스처바 영역)
+            exclusionRects.add(Rect(0, height - 120, width, height))
+            
+            // 좌측 40px 전체 영역 (Back 제스처 비활성화)
+            exclusionRects.add(Rect(0, 0, 40, height))
+            
+            // 우측 40px 전체 영역 (Back 제스처 비활성화)
+            exclusionRects.add(Rect(width - 40, 0, width, height))
+            
+            decorView.systemGestureExclusionRects = exclusionRects
+            
+            Log.d(TAG, "Gesture exclusion set: bottom=${height-120}-$height, left=0-40, right=${width-40}-$width")
         }
     }
 
@@ -492,6 +538,21 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
                 }
+                "canGoBack" -> {
+                    val displayId = call.argument<Int>("displayId")
+                    if (displayId != null) {
+                        try {
+                            val canGoBack = taskManager.canGoBack(displayId)
+                            result.success(canGoBack)
+                        } catch (e: Exception) {
+                            // 에러 시 기본적으로 true 반환 (안전하게 허용)
+                            Log.w(TAG, "canGoBack error: ${e.message}")
+                            result.success(true)
+                        }
+                    } else {
+                        result.success(true)
+                    }
+                }
                 else -> {
                     Log.w(TAG, "Method not implemented: ${call.method}")
                     result.notImplemented()
@@ -505,10 +566,19 @@ class MainActivity : FlutterActivity() {
     private fun getInstalledApps(): List<Map<String, Any?>> {
         val apps = mutableListOf<Map<String, Any?>>()
         val packageManager = context.packageManager
+        val ownPackageName = context.packageName // 자기 자신 패키지명
+        
+        Log.d(TAG, "Getting installed apps, own package: $ownPackageName")
         
         try {
             val packages = packageManager.getInstalledApplications(android.content.pm.PackageManager.GET_META_DATA)
             for (appInfo in packages) {
+                // 자기 자신 패키지 제외
+                if (appInfo.packageName == ownPackageName) {
+                    Log.d(TAG, "Skipping own package: ${appInfo.packageName}")
+                    continue
+                }
+                
                 if (packageManager.getLaunchIntentForPackage(appInfo.packageName) != null) {
                     // 앱 아이콘을 ByteArray로 변환
                     var iconBytes: ByteArray? = null
@@ -547,6 +617,8 @@ class MainActivity : FlutterActivity() {
                     apps.add(app)
                 }
             }
+            
+            Log.d(TAG, "Total apps found: ${apps.size}")
         } catch (e: Exception) {
             Log.e(TAG, "Error getting installed apps", e)
             throw e

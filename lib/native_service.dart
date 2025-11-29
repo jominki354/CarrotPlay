@@ -277,4 +277,19 @@ class NativeService {
       return null;
     }
   }
+  
+  /// 뒤로가기 가능 여부 확인 (앱 종료 방지)
+  /// 앱의 Activity 백스택이 1개 이상이면 true
+  static Future<bool> canGoBack(int displayId) async {
+    try {
+      final result = await _channel.invokeMethod('canGoBack', {
+        'displayId': displayId,
+      });
+      return result == true;
+    } catch (e) {
+      // 에러 시 기본적으로 허용 (안전한 기본값)
+      print("NativeService: Error checking canGoBack: $e");
+      return true;
+    }
+  }
 }

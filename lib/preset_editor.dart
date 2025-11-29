@@ -1,7 +1,11 @@
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'preset_service.dart';
 import 'app_drawer_content.dart';
+import 'theme/app_colors.dart';
+import 'theme/app_dimens.dart';
+import 'widgets/common/app_icon_wrapper.dart';
 
 class PresetEditor extends StatefulWidget {
   final int presetIndex;
@@ -25,6 +29,7 @@ class _PresetEditorState extends State<PresetEditor> {
   @override
   void initState() {
     super.initState();
+    debugPrint('PresetEditor initState called');
     final preset = widget.presetService.presets[widget.presetIndex];
     _pip1Config = preset.pip1;
     _pip2Config = preset.pip2;
@@ -67,6 +72,15 @@ class _PresetEditorState extends State<PresetEditor> {
     );
   }
 
+  void _resetToDefault() {
+    HapticFeedback.mediumImpact();
+    setState(() {
+      _pip1Config = PipAppConfig();
+      _pip2Config = PipAppConfig();
+      _leftRatio = 0.5;
+    });
+  }
+
   void _save() {
     final newPreset = PresetConfig(
       name: '${widget.presetIndex + 1}',
@@ -80,395 +94,239 @@ class _PresetEditorState extends State<PresetEditor> {
 
   @override
   Widget build(BuildContext context) {
-    // 가로모드에서 높이 적응
+    debugPrint('=== PresetEditor build() ===');
     final screenHeight = MediaQuery.of(context).size.height;
-    final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
-    final sheetHeight = isLandscape ? screenHeight * 0.9 : screenHeight * 0.6;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isLandscape = screenWidth > screenHeight;
+    // 가로모드에서는 더 작은 높이 사용
+    final sheetHeight = isLandscape ? screenHeight * 0.85 : screenHeight * 0.6;
     
+    final leftPercent = (_leftRatio * 100).round();
+    final rightPercent = ((1 - _leftRatio) * 100).round();
+
     return Container(
       height: sheetHeight,
+      constraints: BoxConstraints(maxHeight: screenHeight * 0.9),
       decoration: const BoxDecoration(
-        color: Color(0xFF1A1A1A),
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+        color: Color(0xFF1C1C1E),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       child: Column(
-        children: [
-          // 헤더
-          _buildHeader(),
-          
-          // 콘텐츠 (스크롤 가능)
-          Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-              child: isLandscape 
-                  ? _buildLandscapeLayout() 
-                  : _buildPortraitLayout(),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildHeader() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      decoration: const BoxDecoration(
-        border: Border(bottom: BorderSide(color: Colors.white12)),
-      ),
-      child: Row(
-        children: [
-          // 드래그 핸들
-          Expanded(
-            child: Center(
-              child: Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: Colors.white30,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// 가로모드 레이아웃: 좌우로 PIP 설정 배치
-  Widget _buildLandscapeLayout() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // 타이틀 + 저장 버튼
-        Row(
-          children: [
-            Text(
-              '프리셋 ${widget.presetIndex + 1}',
-              style: const TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.w600,
-                color: Colors.white,
-              ),
-            ),
-            const Spacer(),
-            ElevatedButton(
-              onPressed: _save,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.blueAccent,
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
-              ),
-              child: const Text('저장'),
-            ),
-          ],
-        ),
-        const SizedBox(height: 16),
-        
-        // 좌우 비율 선택
-        _buildRatioSelector(),
-        const SizedBox(height: 16),
-        
-        // PIP 1 & PIP 2 가로 배치
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(child: _buildPipCard(1, _pip1Config, Colors.blueAccent)),
-            const SizedBox(width: 16),
-            Expanded(child: _buildPipCard(2, _pip2Config, Colors.greenAccent)),
-          ],
-        ),
-      ],
-    );
-  }
-
-  /// 세로모드 레이아웃
-  Widget _buildPortraitLayout() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // 타이틀 + 저장 버튼
-        Row(
-          children: [
-            Text(
-              '프리셋 ${widget.presetIndex + 1}',
-              style: const TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.w600,
-                color: Colors.white,
-              ),
-            ),
-            const Spacer(),
-            ElevatedButton(
-              onPressed: _save,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.blueAccent,
-                foregroundColor: Colors.white,
-              ),
-              child: const Text('저장'),
-            ),
-          ],
-        ),
-        const SizedBox(height: 16),
-        
-        // 좌우 비율 선택
-        _buildRatioSelector(),
-        const SizedBox(height: 16),
-        
-        // PIP 1
-        _buildPipCard(1, _pip1Config, Colors.blueAccent),
-        const SizedBox(height: 12),
-        
-        // PIP 2
-        _buildPipCard(2, _pip2Config, Colors.greenAccent),
-      ],
-    );
-  }
-
-  Widget _buildRatioSelector() {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.05),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Icon(Icons.view_column, color: Colors.white54, size: 18),
-              const SizedBox(width: 8),
-              const Text(
-                '좌우 비율',
-                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: Colors.white70),
-              ),
-              const Spacer(),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: Colors.blueAccent.withOpacity(0.2),
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: Text(
-                  '${(_leftRatio * 100).round()}:${((1 - _leftRatio) * 100).round()}',
-                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.blueAccent),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          
-          // 비율 버튼들 (가로 스크롤)
-          SizedBox(
-            height: 36,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              itemCount: SplitRatio.options.length,
-              separatorBuilder: (_, __) => const SizedBox(width: 8),
-              itemBuilder: (context, index) {
-                final option = SplitRatio.options[index];
-                final isSelected = (_leftRatio - option.leftRatio).abs() < 0.01;
-                return InkWell(
-                  onTap: () => setState(() => _leftRatio = option.leftRatio),
-                  borderRadius: BorderRadius.circular(6),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12),
-                    decoration: BoxDecoration(
-                      color: isSelected ? Colors.blueAccent : Colors.white.withOpacity(0.08),
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    child: Center(
-                      child: Text(
-                        option.label,
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
-                          color: isSelected ? Colors.white : Colors.white60,
-                        ),
-                      ),
-                    ),
-                  ),
-                );
-              },
-            ),
-          ),
-          const SizedBox(height: 12),
-          
-          // 비율 미리보기 바
-          Container(
-            height: 20,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(4),
-              border: Border.all(color: Colors.white24),
-            ),
-            child: Row(
-              children: [
-                Expanded(
-                  flex: (_leftRatio * 100).round(),
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: Colors.blueAccent.withOpacity(0.6),
-                      borderRadius: const BorderRadius.horizontal(left: Radius.circular(3)),
-                    ),
-                    child: const Center(
-                      child: Text('L', style: TextStyle(fontSize: 10, color: Colors.white70)),
-                    ),
-                  ),
-                ),
-                Expanded(
-                  flex: ((1 - _leftRatio) * 100).round(),
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: Colors.greenAccent.withOpacity(0.6),
-                      borderRadius: const BorderRadius.horizontal(right: Radius.circular(3)),
-                    ),
-                    child: const Center(
-                      child: Text('R', style: TextStyle(fontSize: 10, color: Colors.white70)),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildPipCard(int pipIndex, PipAppConfig config, Color accentColor) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.05),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: accentColor.withOpacity(0.3)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          // 헤더
-          Row(
-            children: [
-              Container(
-                width: 8,
-                height: 8,
-                decoration: BoxDecoration(
-                  color: accentColor,
-                  shape: BoxShape.circle,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                'PIP $pipIndex (${pipIndex == 1 ? "좌측" : "우측"})',
-                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white),
-              ),
-            ],
+          // 드래그 핸들
+          Container(
+            margin: const EdgeInsets.only(top: 8),
+            width: 40,
+            height: 4,
+            decoration: BoxDecoration(
+              color: Colors.white24,
+              borderRadius: BorderRadius.circular(2),
+            ),
           ),
           const SizedBox(height: 12),
           
-          // 앱 선택 버튼
-          InkWell(
-            onTap: () => _selectAppForPip(pipIndex),
-            borderRadius: BorderRadius.circular(8),
-            child: Container(
-              height: 56,
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.05),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: config.isNotEmpty ? accentColor.withOpacity(0.5) : Colors.white24),
-              ),
-              child: config.isNotEmpty
-                  ? Row(
-                      children: [
-                        // 앱 아이콘
-                        Container(
-                          width: 40,
-                          height: 40,
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(8),
-                            color: Colors.white.withOpacity(0.1),
-                          ),
-                          child: config.icon != null
-                              ? ClipRRect(
-                                  borderRadius: BorderRadius.circular(8),
-                                  child: Image.memory(config.icon!, fit: BoxFit.cover),
-                                )
-                              : const Icon(Icons.android, color: Colors.white54, size: 24),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Text(
-                            config.appName ?? '',
-                            style: const TextStyle(fontSize: 13, color: Colors.white),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        const Icon(Icons.chevron_right, color: Colors.white38, size: 20),
-                      ],
-                    )
-                  : const Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(Icons.add_circle_outline, color: Colors.white38, size: 20),
-                        SizedBox(width: 8),
-                        Text('앱 선택', style: TextStyle(color: Colors.white38)),
-                      ],
-                    ),
-            ),
-          ),
-          
-          // 크기 조절 (앱이 선택된 경우에만)
-          if (config.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            Row(
+          // 헤더
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Row(
               children: [
-                const Text('크기', style: TextStyle(fontSize: 12, color: Colors.white54)),
-                const Spacer(),
                 Text(
-                  '${(config.scale * 100).round()}%',
-                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: accentColor),
+                  '프리셋 ${widget.presetIndex + 1}',
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.white,
+                  ),
+                ),
+                const Spacer(),
+                GestureDetector(
+                  onTap: _resetToDefault,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.white10,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Text('초기화', style: TextStyle(color: Colors.white70, fontSize: 13)),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                GestureDetector(
+                  onTap: _save,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: AppColors.carrotOrange,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Text('저장', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13)),
+                  ),
                 ),
               ],
             ),
-            const SizedBox(height: 4),
-            SliderTheme(
-              data: SliderTheme.of(context).copyWith(
-                trackHeight: 4,
-                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 8),
-                overlayShape: const RoundSliderOverlayShape(overlayRadius: 16),
-              ),
-              child: Slider(
-                value: config.scale,
-                min: 0.5,
-                max: 1.5,
-                divisions: 20,
-                activeColor: accentColor,
-                inactiveColor: Colors.white24,
-                onChanged: (value) {
-                  final snapped = (value * 20).round() / 20.0;
-                  setState(() {
-                    if (pipIndex == 1) {
-                      _pip1Config = _pip1Config.copyWith(scale: snapped);
-                    } else {
-                      _pip2Config = _pip2Config.copyWith(scale: snapped);
-                    }
-                  });
-                },
+          ),
+          const SizedBox(height: 12),
+          
+          // 내용
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // 비율 프리뷰
+                  Container(
+                    height: 80,
+                    decoration: BoxDecoration(
+                      color: Colors.black26,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: Colors.white10),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          flex: 1,
+                          child: Container(
+                            margin: const EdgeInsets.all(4),
+                            decoration: BoxDecoration(
+                              color: _pip1Config.isNotEmpty 
+                                  ? AppColors.carrotOrange.withOpacity(0.3)
+                                  : Colors.white10,
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(color: AppColors.carrotOrange.withOpacity(0.5), width: 2),
+                            ),
+                            child: Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(Icons.looks_one, color: AppColors.carrotOrange, size: 22),
+                                  Text('$leftPercent%', style: const TextStyle(color: AppColors.carrotOrange, fontSize: 12)),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                        Container(width: 2, color: Colors.white24, margin: const EdgeInsets.symmetric(vertical: 8)),
+                        Expanded(
+                          flex: 1,
+                          child: Container(
+                            margin: const EdgeInsets.all(4),
+                            decoration: BoxDecoration(
+                              color: _pip2Config.isNotEmpty 
+                                  ? AppColors.successGreen.withOpacity(0.3)
+                                  : Colors.white10,
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(color: AppColors.successGreen.withOpacity(0.5), width: 2),
+                            ),
+                            child: Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(Icons.looks_two, color: AppColors.successGreen, size: 22),
+                                  Text('$rightPercent%', style: const TextStyle(color: AppColors.successGreen, fontSize: 12)),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  
+                  // 비율 슬라이더
+                  Row(
+                    children: [
+                      Text('$leftPercent%', style: const TextStyle(color: AppColors.carrotOrange, fontWeight: FontWeight.w600, fontSize: 13)),
+                      Expanded(
+                        child: SliderTheme(
+                          data: SliderTheme.of(context).copyWith(
+                            trackHeight: 4,
+                            thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 8),
+                          ),
+                          child: Slider(
+                            value: _leftRatio,
+                            min: 0.3,
+                            max: 0.7,
+                            divisions: 8,
+                            activeColor: AppColors.carrotOrange,
+                            inactiveColor: AppColors.successGreen.withOpacity(0.3),
+                            onChanged: (value) {
+                              HapticFeedback.selectionClick();
+                              setState(() => _leftRatio = value);
+                            },
+                          ),
+                        ),
+                      ),
+                      Text('$rightPercent%', style: const TextStyle(color: AppColors.successGreen, fontWeight: FontWeight.w600, fontSize: 13)),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  
+                  // PIP 1 앱 선택
+                  _buildAppSelector(1, _pip1Config, AppColors.carrotOrange),
+                  const SizedBox(height: 8),
+                  
+                  // PIP 2 앱 선택
+                  _buildAppSelector(2, _pip2Config, AppColors.successGreen),
+                  const SizedBox(height: 16),
+                ],
               ),
             ),
-          ],
+          ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildAppSelector(int pipIndex, PipAppConfig config, Color color) {
+    return GestureDetector(
+      onTap: () => _selectAppForPip(pipIndex),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(0.05),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: config.isNotEmpty ? color.withOpacity(0.5) : Colors.white10),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+            ),
+            const SizedBox(width: 8),
+            Text('화면 $pipIndex', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13)),
+            const Spacer(),
+            if (config.isNotEmpty) ...[
+              if (config.icon != null)
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(6),
+                  child: Image.memory(config.icon!, width: 28, height: 28, fit: BoxFit.cover),
+                ),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  config.appName ?? '',
+                  style: const TextStyle(color: Colors.white70, fontSize: 12),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ] else
+              const Text('앱 선택', style: TextStyle(color: Colors.white38, fontSize: 12)),
+            const SizedBox(width: 4),
+            const Icon(Icons.chevron_right, color: Colors.white38, size: 18),
+          ],
+        ),
       ),
     );
   }
 }
 
-/// 앱 선택 바텀시트
 class _AppSelectorSheet extends StatelessWidget {
   final void Function(AppInfo) onSelect;
   final VoidCallback onClear;
@@ -485,99 +343,65 @@ class _AppSelectorSheet extends StatelessWidget {
     final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
     
     return Container(
-      height: isLandscape ? screenHeight * 0.85 : screenHeight * 0.7,
+      height: isLandscape ? screenHeight * 0.85 : screenHeight * 0.8,
       decoration: const BoxDecoration(
-        color: Color(0xFF252525),
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+        color: Color(0xFF2C2C2E),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       child: Column(
         children: [
-          // 헤더
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            decoration: const BoxDecoration(
-              border: Border(bottom: BorderSide(color: Colors.white12)),
-            ),
+          // Header
+          Padding(
+            padding: const EdgeInsets.all(12),
             child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text(
-                  '앱 선택',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white),
-                ),
-                const Spacer(),
+                const Text('앱 선택', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white)),
                 TextButton(
                   onPressed: onClear,
-                  child: const Text('비우기', style: TextStyle(color: Colors.redAccent)),
+                  child: const Text('비우기', style: TextStyle(color: AppColors.errorRed, fontSize: 13)),
                 ),
               ],
             ),
           ),
           
-          // 앱 그리드
+          // Grid
           Expanded(
             child: apps.isEmpty
-                ? const Center(child: CircularProgressIndicator(color: Colors.white38))
+                ? const Center(child: CircularProgressIndicator())
                 : GridView.builder(
-                    padding: const EdgeInsets.all(12),
+                    padding: const EdgeInsets.all(16),
                     gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: isLandscape ? 8 : 5,
-                      mainAxisSpacing: 12,
-                      crossAxisSpacing: 12,
-                      childAspectRatio: 0.85,
+                      crossAxisCount: isLandscape ? 8 : 4,
+                      mainAxisSpacing: 16,
+                      crossAxisSpacing: 16,
+                      childAspectRatio: 0.8,
                     ),
                     itemCount: apps.length,
                     itemBuilder: (context, index) {
                       final app = apps[index];
-                      return _buildAppItem(app);
+                      return GestureDetector(
+                        onTap: () => onSelect(app),
+                        child: Column(
+                          children: [
+                            AppIconWrapper(
+                              iconData: app.icon,
+                              size: 56,
+                              radius: AppDimens.radiusMedium,
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              app.appName,
+                              style: const TextStyle(fontSize: 12, color: Colors.white70),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              textAlign: TextAlign.center,
+                            ),
+                          ],
+                        ),
+                      );
                     },
                   ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildAppItem(AppInfo app) {
-    return InkWell(
-      onTap: () => onSelect(app),
-      borderRadius: BorderRadius.circular(8),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          // 아이콘 (80% 크기)
-          Expanded(
-            flex: 3,
-            child: Center(
-              child: FractionallySizedBox(
-                widthFactor: 0.8,
-                heightFactor: 0.8,
-                child: app.icon != null
-                    ? ClipRRect(
-                        borderRadius: BorderRadius.circular(12),
-                        child: Image.memory(app.icon!, fit: BoxFit.cover),
-                      )
-                    : Container(
-                        decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: const Icon(Icons.android, color: Colors.white54, size: 28),
-                      ),
-              ),
-            ),
-          ),
-          // 앱 이름
-          Expanded(
-            flex: 1,
-            child: Center(
-              child: Text(
-                app.appName,
-                style: const TextStyle(fontSize: 10, color: Colors.white70),
-                maxLines: 1,
-                textAlign: TextAlign.center,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
           ),
         ],
       ),

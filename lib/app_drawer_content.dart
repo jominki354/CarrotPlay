@@ -1,8 +1,13 @@
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'theme/app_colors.dart';
+import 'theme/app_text_styles.dart';
+import 'theme/app_dimens.dart';
+import 'widgets/common/app_icon_wrapper.dart';
+import 'widgets/animations/bouncy_button.dart';
 
-/// 앱 정보 클래스
+/// App Information Data Class
 class AppInfo {
   final String packageName;
   final String appName;
@@ -15,7 +20,7 @@ class AppInfo {
   });
 }
 
-/// 글로벌 앱 캐시 - 앱 시작시 미리 로드
+/// Global App Cache - Preloads installed apps
 class AppCache {
   static final AppCache _instance = AppCache._internal();
   factory AppCache() => _instance;
@@ -31,7 +36,6 @@ class AppCache {
   bool get isLoaded => _isLoaded;
   bool get isLoading => _isLoading;
   
-  /// 앱 시작시 호출 - 미리 로드
   static Future<void> preload() async {
     await _instance._load();
   }
@@ -62,7 +66,6 @@ class AppCache {
     _isLoading = false;
   }
   
-  /// 강제 새로고침
   Future<void> refresh() async {
     _isLoaded = false;
     _apps = null;
@@ -70,15 +73,17 @@ class AppCache {
   }
 }
 
-/// 앱 서랍 콘텐츠 - 완전히 새로 설계
+/// App Drawer Content - Redesigned
 class AppDrawerContent extends StatefulWidget {
-  final VoidCallback onClose;
+  final VoidCallback? onClose;
   final void Function(String packageName)? onAppSelected;
+  final bool showCarrotPlaySettings;
   
   const AppDrawerContent({
     super.key, 
-    required this.onClose,
+    this.onClose,
     this.onAppSelected,
+    this.showCarrotPlaySettings = true,
   });
 
   @override
@@ -89,12 +94,30 @@ class _AppDrawerContentState extends State<AppDrawerContent> {
   final PageController _pageController = PageController();
   int _currentPage = 0;
   
-  // 그리드 설정 (2행 5열)
+  // Grid Configuration (2 rows, 5 columns)
   static const int _colCount = 5;
   static const int _rowCount = 2;
   static const int _itemsPerPage = _colCount * _rowCount;
 
-  List<AppInfo> get _apps => AppCache().apps;
+  // CarrotPlay 앱은 Native에서 이미 필터링됨
+  // 여기서는 추가 필터링 없이 그대로 사용
+  List<AppInfo> get _filteredApps => AppCache().apps;
+  
+  // 첫 칸에 CarrotPlay 설정 추가 (옵션에 따라)
+  List<AppInfo> get _apps {
+    final apps = _filteredApps;
+    if (widget.showCarrotPlaySettings) {
+      // 첫 칸에 CarrotPlay 설정 메뉴 추가
+      final settingsItem = AppInfo(
+        packageName: 'carrotplay.settings',
+        appName: 'CarrotPlay',
+        icon: null, // 커스텀 아이콘 사용
+      );
+      return [settingsItem, ...apps];
+    }
+    return apps;
+  }
+  
   int get _totalPages => (_apps.length / _itemsPerPage).ceil().clamp(1, 100);
 
   @override
@@ -107,16 +130,15 @@ class _AppDrawerContentState extends State<AppDrawerContent> {
     if (widget.onAppSelected != null) {
       widget.onAppSelected!(packageName);
     } else {
-      widget.onClose();
+      widget.onClose?.call();
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    // 캐시가 없으면 빈 화면 (거의 발생 안함)
     if (_apps.isEmpty) {
       return Container(
-        color: const Color(0xFF1A1A1A),
+        color: AppColors.glassGrey,
         child: const Center(
           child: CircularProgressIndicator(color: Colors.white38),
         ),
@@ -124,19 +146,19 @@ class _AppDrawerContentState extends State<AppDrawerContent> {
     }
     
     return Container(
-      color: const Color(0xFF1A1A1A),
+      color: AppColors.glassGrey,
       child: Column(
         children: [
-          // 앱 그리드
+          // App Grid
           Expanded(
             child: PageView.builder(
-              controller: _pageController,
-              onPageChanged: (page) => setState(() => _currentPage = page),
-              itemCount: _totalPages,
-              itemBuilder: (context, pageIndex) => _buildAppGrid(pageIndex),
-            ),
+            controller: _pageController,
+            onPageChanged: (page) => setState(() => _currentPage = page),
+            itemCount: _totalPages,
+            itemBuilder: (context, pageIndex) => _buildAppGrid(pageIndex),
           ),
-          // 페이지 인디케이터
+        ),
+          // Page Indicator
           _buildPageIndicator(),
         ],
       ),
@@ -148,24 +170,19 @@ class _AppDrawerContentState extends State<AppDrawerContent> {
     final endIndex = (startIndex + _itemsPerPage).clamp(0, _apps.length);
     final pageApps = _apps.sublist(startIndex, endIndex);
 
-    // CarPlay 스타일: 상하좌우 동일 여백
     return LayoutBuilder(
       builder: (context, constraints) {
-        // 아이템 크기 계산 (2행 5열)
         final availableWidth = constraints.maxWidth;
         final availableHeight = constraints.maxHeight;
-        final spacing = 12.0;
+        const spacing = AppDimens.paddingMedium;
         
-        // 가로 기준으로 아이템 크기 계산
         final itemWidth = (availableWidth - spacing * (_colCount + 1)) / _colCount;
         final itemHeight = (availableHeight - spacing * (_rowCount + 1)) / _rowCount;
         final itemSize = itemWidth < itemHeight ? itemWidth : itemHeight;
         
-        // 전체 그리드 크기
         final gridWidth = itemSize * _colCount + spacing * (_colCount - 1);
         final gridHeight = itemSize * _rowCount + spacing * (_rowCount - 1);
         
-        // 중앙 정렬을 위한 패딩
         final horizontalPadding = (availableWidth - gridWidth) / 2;
         final verticalPadding = (availableHeight - gridHeight) / 2;
         
@@ -191,17 +208,51 @@ class _AppDrawerContentState extends State<AppDrawerContent> {
   }
 
   Widget _buildAppItem(AppInfo app) {
-    // 아이콘 크기 20% 줄임 (0.8 스케일)
-    return GestureDetector(
-      onTap: () => _onAppTap(app.packageName),
-      behavior: HitTestBehavior.opaque,
+    // CarrotPlay 설정 메뉴 (첫 칸)
+    if (app.packageName == 'carrotplay.settings') {
+      return BouncyButton(
+        onPressed: () => _openCarrotPlaySettings(),
+        child: Center(
+          child: FractionallySizedBox(
+            widthFactor: 0.8,
+            heightFactor: 0.8,
+            child: Container(
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  colors: [Color(0xFFFF8F40), Color(0xFFFF6B00)],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(AppDimens.radiusMedium),
+                boxShadow: [
+                  BoxShadow(
+                    color: AppColors.carrotOrange.withOpacity(0.3),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: const Icon(
+                Icons.settings_rounded,
+                color: Colors.white,
+                size: 36,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+    
+    // 일반 앱 아이콘 (이름 없음), 0.8 스케일 유지
+    return BouncyButton(
+      onPressed: () => _onAppTap(app.packageName),
       child: Center(
         child: FractionallySizedBox(
           widthFactor: 0.8,
           heightFactor: 0.8,
           child: app.icon != null
               ? ClipRRect(
-                  borderRadius: BorderRadius.circular(14),
+                  borderRadius: BorderRadius.circular(AppDimens.radiusMedium),
                   child: Image.memory(
                     app.icon!,
                     fit: BoxFit.cover,
@@ -211,7 +262,7 @@ class _AppDrawerContentState extends State<AppDrawerContent> {
               : Container(
                   decoration: BoxDecoration(
                     color: Colors.white.withOpacity(0.1),
-                    borderRadius: BorderRadius.circular(14),
+                    borderRadius: BorderRadius.circular(AppDimens.radiusMedium),
                   ),
                   child: Icon(
                     _getAppIcon(app.packageName),
@@ -224,35 +275,14 @@ class _AppDrawerContentState extends State<AppDrawerContent> {
     );
   }
 
-  Widget _buildPageIndicator() {
-    if (_totalPages <= 1) return const SizedBox(height: 24);
-    
-    return Container(
-      height: 24,
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: List.generate(_totalPages, (index) {
-          final isActive = index == _currentPage;
-          return GestureDetector(
-            onTap: () => _pageController.animateToPage(
-              index,
-              duration: const Duration(milliseconds: 200),
-              curve: Curves.easeOut,
-            ),
-            child: Container(
-              width: isActive ? 16 : 6,
-              height: 6,
-              margin: const EdgeInsets.symmetric(horizontal: 3),
-              decoration: BoxDecoration(
-                color: isActive ? Colors.white : Colors.white30,
-                borderRadius: BorderRadius.circular(3),
-              ),
-            ),
-          );
-        }),
-      ),
-    );
+  void _openCarrotPlaySettings() {
+    // 설정 메뉴를 콜백으로 전달 (onAppSelected에 특수 패키지명 전달)
+    // onClose보다 먼저 호출해야 위젯이 살아있을 때 콜백 전달됨
+    if (widget.onAppSelected != null) {
+      widget.onAppSelected!('carrotplay.settings');
+    } else {
+      widget.onClose?.call();
+    }
   }
 
   IconData _getAppIcon(String packageName) {
@@ -263,5 +293,37 @@ class _AppDrawerContentState extends State<AppDrawerContent> {
     if (packageName.contains('chrome') || packageName.contains('browser')) return Icons.public;
     if (packageName.contains('setting')) return Icons.settings;
     return Icons.android;
+  }
+
+  Widget _buildPageIndicator() {
+    if (_totalPages <= 1) return const SizedBox(height: 24);
+    
+    return Container(
+      height: 24,
+      padding: const EdgeInsets.only(bottom: AppDimens.paddingSmall),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: List.generate(_totalPages, (index) {
+          final isActive = index == _currentPage;
+          return GestureDetector(
+            onTap: () => _pageController.animateToPage(
+              index,
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeOutQuart,
+            ),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 300),
+              width: isActive ? 16 : 6,
+              height: 6,
+              margin: const EdgeInsets.symmetric(horizontal: 3),
+              decoration: BoxDecoration(
+                color: isActive ? AppColors.carrotOrange : Colors.white30,
+                borderRadius: BorderRadius.circular(3),
+              ),
+            ),
+          );
+        }),
+      ),
+    );
   }
 }

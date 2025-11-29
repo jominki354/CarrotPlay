@@ -58,6 +58,79 @@ class PipViewState extends State<PipView> with SingleTickerProviderStateMixin {
   /// 현재 실행 중인 앱 패키지 이름
   String? get currentPackage => _currentPackage;
   
+  /// 외부에서 PIP 내 앱서랍 열기 (아래에서 위로 올라오는 애니메이션)
+  void openInlineDrawer() {
+    setState(() {
+      _showInlinePipDrawer = true;
+      _drawerSlideOffset = 1.0; // 화면 아래에서 시작
+    });
+    // 다음 프레임에서 애니메이션 시작
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _animateDrawerOpen();
+      }
+    });
+  }
+  
+  /// 외부에서 PIP 내 앱서랍 닫기
+  void closeInlineDrawer() {
+    if (_showInlinePipDrawer) {
+      _animateDrawerClose();
+    }
+  }
+  
+  /// 외부에서 뒤로가기 키 전송 (앱 종료 방지)
+  Future<void> sendBackKey() async {
+    if (_virtualDisplayId == null) return;
+    
+    // 뒤로가기 가능 여부 확인 (앱이 종료될 수 있는지)
+    final canGoBack = await NativeService.canGoBack(_virtualDisplayId!);
+    
+    if (canGoBack) {
+      // 뒤로가기 가능하면 전송
+      NativeService.sendBackKey(_virtualDisplayId!);
+    } else {
+      // 뒤로가기 불가 (앱 종료 방지) - 진동 피드백만
+      HapticFeedback.lightImpact();
+      debugPrint('PIP: Back blocked - app would close');
+    }
+  }
+  
+  /// 외부에서 VirtualDisplay 크기 재조정 (비율 변경 시)
+  Future<void> resizeToFit(double widthRatio, double totalWidth, double totalHeight, double devicePixelRatio) async {
+    if (_virtualDisplayId == null || !_initialized) return;
+    
+    // 새 크기 계산 (Dock 72px, 구분선 8px, 마진 4px 고려)
+    final contentWidth = totalWidth - 72 - 8; // Dock 제외, 구분선 제외
+    final pipWidth = contentWidth * widthRatio - 8; // 마진 고려
+    final pipHeight = totalHeight - 24 - 8; // 하단 제스처바 + 마진
+    
+    final newWidth = (pipWidth * devicePixelRatio).toInt();
+    final newHeight = (pipHeight * devicePixelRatio).toInt();
+    
+    if (newWidth <= 0 || newHeight <= 0) return;
+    
+    final targetDpi = (160 * devicePixelRatio).toInt();
+    
+    debugPrint('PipView resizeToFit: ${newWidth}x$newHeight @ ${targetDpi}dpi');
+    
+    final success = await NativeService.resizeVirtualDisplay(
+      _virtualDisplayId!,
+      newWidth,
+      newHeight,
+      targetDpi,
+    );
+    
+    if (success && mounted) {
+      setState(() {
+        _virtualDisplayWidth = newWidth;
+        _virtualDisplayHeight = newHeight;
+        _currentDisplayWidth = newWidth;
+        _currentDisplayHeight = newHeight;
+      });
+    }
+  }
+  
   // 터치 관련
   bool _showControls = false;
   Timer? _controlsTimer;
@@ -337,7 +410,7 @@ class PipViewState extends State<PipView> with SingleTickerProviderStateMixin {
     
     // 분할 PIP 모드: 가우시안 블러 + 테두리
     return Container(
-      margin: const EdgeInsets.all(4.0),
+      margin: const EdgeInsets.only(left: 4, top: 4, right: 4, bottom: 0), // 하단 여백 없음 (제스처바 영역)
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12.0),
         border: Border.all(
