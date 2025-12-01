@@ -7,6 +7,7 @@ import 'package:flutter/rendering.dart';
 import 'native_service.dart';
 import 'app_selection_screen.dart';
 import 'app_drawer_content.dart';
+import 'home_screen.dart' show kUseNativePip;  // Native PIP 모드 플래그
 import 'package:get/get.dart';
 import 'dart:async';
 import 'dart:math' as math;
@@ -251,8 +252,9 @@ class PipViewState extends State<PipView> with SingleTickerProviderStateMixin {
       }
     });
     
-    // 앱 종료 감지 타이머 (전체화면 모드가 아닐 때만) - 500ms마다 체크 (성능 최적화)
-    if (!widget.isFullscreen) {
+    // 앱 종료 감지 타이머 (Flutter PIP 모드 + 전체화면이 아닐 때만)
+    // Native PIP 모드에서는 Native가 직접 관리하므로 불필요한 MethodChannel 호출 방지
+    if (!widget.isFullscreen && !kUseNativePip) {
       _appCheckTimer = Timer.periodic(const Duration(milliseconds: 500), (_) => _checkAppRunning());
     }
   }

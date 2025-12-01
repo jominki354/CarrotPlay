@@ -46,8 +46,8 @@ class PerformanceMonitor {
     // 프레임 콜백 등록
     SchedulerBinding.instance.addTimingsCallback(_onFrameTimings);
     
-    // 주기적 업데이트 (1초마다 - 성능 개선)
-    _updateTimer = Timer.periodic(const Duration(milliseconds: 1000), (_) {
+    // 주기적 업데이트 (2초마다 - 성능 개선)
+    _updateTimer = Timer.periodic(const Duration(milliseconds: 2000), (_) {
       _calculateMetrics();
       _emitData();
     });

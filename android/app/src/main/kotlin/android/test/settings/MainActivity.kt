@@ -19,6 +19,8 @@ import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
+import android.widget.FrameLayout
+import android.graphics.PixelFormat
 import io.flutter.view.TextureRegistry
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -26,6 +28,7 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "com.carcarlauncher.clone/launcher"
+    private val NATIVE_PIP_CHANNEL = "com.carcarlauncher.clone/native_pip"
     private val TAG = "CarrotPlay"
     private lateinit var virtualDisplayManager: VirtualDisplayManager
     private lateinit var launcherApps: LauncherApps
@@ -33,6 +36,13 @@ class MainActivity : FlutterActivity() {
     private var useSystemApi = false // 시스템 API 사용 가능 여부
     private val handler = Handler(Looper.getMainLooper())
     private val textureEntries = mutableMapOf<Int, TextureRegistry.SurfaceTextureEntry>()
+
+    // Native PIP Manager (3개의 별도 Window 관리)
+    private var nativePipManager: NativePipManager? = null
+    // Legacy: 이전 방식 (제거 예정)
+    private var nativePipContainer: NativePipContainer? = null
+    private var flutterContainer: FrameLayout? = null
+    private var pipContainer: FrameLayout? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         // 가장 먼저 방향 설정 - super.onCreate 전에!
@@ -48,6 +58,11 @@ class MainActivity : FlutterActivity() {
         
         // Keep screen on (차량용)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        
+        // Layout 변경 감지하여 제스처 제외 영역 업데이트 (키보드 등)
+        window.decorView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            setupGestureExclusion()
+        }
         
         // 추가 지연 설정 (Flutter 엔진 초기화 후)
         handler.postDelayed({ 
@@ -271,8 +286,9 @@ class MainActivity : FlutterActivity() {
     
     /**
      * 시스템 제스처 비활성화 영역 설정
-     * 하단 120px, 좌우 가장자리 40px에서 시스템 Back 제스처 비활성화
-     * 차량용 런처에서 앱 내 제스처와 충돌 방지
+     * Android 10+ 제스처 제외 영역 제한: 수직 엣지당 최대 200dp
+     * 전체 높이를 제외하려고 하면 시스템이 요청을 무시할 수 있음
+     * 따라서 하단부(앱 제스처 영역 + 키보드 영역 일부)를 우선적으로 제외
      */
     private fun setupGestureExclusion() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
@@ -282,26 +298,24 @@ class MainActivity : FlutterActivity() {
             val width = decorView.width
             val height = decorView.height
             
-            if (width <= 0 || height <= 0) {
-                // 크기가 아직 결정되지 않은 경우 다시 시도
-                handler.postDelayed({ setupGestureExclusion() }, 100)
-                return@post
-            }
+            if (width <= 0 || height <= 0) return@post
             
             val exclusionRects = mutableListOf<Rect>()
             
-            // 하단 120px 전체 영역 (PIP 제스처바 영역)
-            exclusionRects.add(Rect(0, height - 120, width, height))
+            val density = resources.displayMetrics.density
+            // 200dp 제한 (시스템 한계)
+            val maxExclusionHeight = (200 * density).toInt()
             
-            // 좌측 40px 전체 영역 (Back 제스처 비활성화)
-            exclusionRects.add(Rect(0, 0, 40, height))
+            // 하단 180dp 제외 (앱 제스처바 및 키보드 하단 보호)
+            // 키보드가 올라왔을 때도 하단부의 Back 제스처 오동작 방지
+            val bottomExclusionHeight = (180 * density).toInt().coerceAtMost(maxExclusionHeight)
             
-            // 우측 40px 전체 영역 (Back 제스처 비활성화)
-            exclusionRects.add(Rect(width - 40, 0, width, height))
+            // 하단 영역 전체 너비 제외 (좌우 엣지의 하단부 포함)
+            exclusionRects.add(Rect(0, height - bottomExclusionHeight, width, height))
             
             decorView.systemGestureExclusionRects = exclusionRects
             
-            Log.d(TAG, "Gesture exclusion set: bottom=${height-120}-$height, left=0-40, right=${width-40}-$width")
+            Log.d(TAG, "Gesture exclusion updated: bottom ${bottomExclusionHeight}px")
         }
     }
 
@@ -371,6 +385,124 @@ class MainActivity : FlutterActivity() {
         }
         
         virtualDisplayManager = VirtualDisplayManager.getInstance(context)
+
+        // =================================================================================
+        // Native PIP Channel Setup
+        // =================================================================================
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, NATIVE_PIP_CHANNEL).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "setEnabled" -> {
+                    val enabled = call.argument<Boolean>("enabled") ?: false
+                    if (enabled) {
+                        val screenWidth = call.argument<Int>("screenWidth") ?: 1920
+                        val screenHeight = call.argument<Int>("screenHeight") ?: 1080
+                        val pipHeight = call.argument<Int>("pipHeight") ?: screenHeight
+                        Log.i(TAG, "Native PIP setEnabled: true, screen=${screenWidth}x${screenHeight}, pipHeight=$pipHeight")
+                        
+                        // 동기적으로 초기화 (runOnUiThread 내부에서 완료 후 result 반환)
+                        runOnUiThread {
+                            try {
+                                if (nativePipManager == null) {
+                                    // WindowManager를 통해 3개의 별도 Window로 추가
+                                    val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                                    val windowToken = window.decorView.windowToken
+                                    
+                                    // Dock 너비 (Flutter에서 72dp = 72 * density)
+                                    val density = resources.displayMetrics.density
+                                    val dockWidthPx = (72 * density).toInt()
+                                    
+                                    // NativePipManager 생성 (3개의 Window 관리)
+                                    val pipWidth = screenWidth - dockWidthPx
+                                    nativePipManager = NativePipManager(context, wm, windowToken)
+                                    
+                                    // 초기화 (3개의 Window 생성)
+                                    val success = nativePipManager?.initialize(
+                                        x = dockWidthPx,
+                                        y = 0,
+                                        width = pipWidth,
+                                        height = pipHeight
+                                    ) ?: false
+                                    
+                                    if (success) {
+                                        // Setup callbacks
+                                        nativePipManager?.onRatioChanged = { ratio ->
+                                            Log.d(TAG, "Native PIP ratio changed: $ratio")
+                                        }
+                                        
+                                        Log.i(TAG, "Native PIP Manager created: ${pipWidth}x${pipHeight}, dockWidth=$dockWidthPx (3 separate Windows)")
+                                        result.success(true)
+                                    } else {
+                                        Log.e(TAG, "Native PIP Manager initialization failed")
+                                        nativePipManager?.release()
+                                        nativePipManager = null
+                                        result.success(false)
+                                    }
+                                } else {
+                                    nativePipManager?.setVisible(true)
+                                    Log.i(TAG, "Native PIP Manager already initialized, making visible")
+                                    result.success(true)
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Native PIP initialization failed", e)
+                                result.success(false)
+                            }
+                        }
+                    } else {
+                        Log.i(TAG, "Native PIP setEnabled: false")
+                        // 비활성화 시 Native PIP 숨김
+                        runOnUiThread {
+                            nativePipManager?.setVisible(false)
+                        }
+                        result.success(true)
+                    }
+                }
+                "initNativePip" -> {
+                    val width = call.argument<Int>("width") ?: 800
+                    val height = call.argument<Int>("height") ?: 480
+                    setupNativeLayout(width, height)
+                    result.success(true)
+                }
+                "updatePipRatio" -> {
+                    val ratio = call.argument<Double>("ratio")?.toFloat() ?: 0.5f
+                    nativePipManager?.setRatio(ratio)
+                    result.success(true)
+                }
+                "setRatio" -> {
+                    val ratio = call.argument<Double>("ratio")?.toFloat() ?: 0.5f
+                    nativePipManager?.setRatio(ratio)
+                    result.success(true)
+                }
+                "setRatioAnimated" -> {
+                    val ratio = call.argument<Double>("ratio")?.toFloat() ?: 0.5f
+                    val durationMs = call.argument<Int>("durationMs")?.toLong() ?: 150L
+                    nativePipManager?.setRatioAnimated(ratio, durationMs) {
+                        // 애니메이션 완료 콜백 (필요시 Flutter로 전달)
+                    }
+                    result.success(true)
+                }
+                "launchAppInPip", "launchApp" -> {
+                    val pipIndex = call.argument<Int>("pipIndex") ?: 0
+                    val packageName = call.argument<String>("packageName")
+                    Log.i(TAG, "launchApp: pipIndex=$pipIndex, packageName=$packageName, nativePipManager=${nativePipManager != null}")
+                    if (packageName != null) {
+                        val success = nativePipManager?.launchApp(pipIndex, packageName) ?: false
+                        Log.i(TAG, "launchApp result: $success")
+                        result.success(success)
+                    } else {
+                        result.error("INVALID_ARGS", "Package name required", null)
+                    }
+                }
+                "getPipInfo" -> {
+                    val pipIndex = call.argument<Int>("pipIndex") ?: 0
+                    val info = mapOf(
+                        "displayId" to (nativePipManager?.getPipDisplayId(pipIndex) ?: -1),
+                        "currentPackage" to (nativePipManager?.getPipCurrentPackage(pipIndex))
+                    )
+                    result.success(info)
+                }
+                else -> result.notImplemented()
+            }
+        }
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             Log.d(TAG, "MethodChannel received: ${call.method}")
@@ -731,6 +863,36 @@ class MainActivity : FlutterActivity() {
         Log.d(TAG, "Flutter Engine configured successfully")
     }
 
+    private fun setupNativeLayout(width: Int, height: Int) {
+        runOnUiThread {
+            if (nativePipContainer != null) return@runOnUiThread
+
+            flutterContainer = findViewById(R.id.flutter_container)
+            pipContainer = findViewById(R.id.native_pip_container)
+
+            if (pipContainer == null) {
+                Log.e(TAG, "Native PIP container view not found in XML!")
+                return@runOnUiThread
+            }
+
+            // Create NativePipContainer
+            nativePipContainer = NativePipContainer(context, width, height)
+            
+            // Add to layout
+            pipContainer?.removeAllViews()
+            pipContainer?.addView(nativePipContainer)
+            pipContainer?.visibility = View.VISIBLE // Make sure it's visible!
+
+            // Setup callbacks
+            nativePipContainer?.onRatioChanged = { ratio ->
+                // Send back to Flutter if needed
+                // MethodChannel(flutterEngine!!.dartExecutor.binaryMessenger, NATIVE_PIP_CHANNEL).invokeMethod("onRatioChanged", mapOf("ratio" to ratio))
+            }
+            
+            Log.i(TAG, "Native PIP Layout initialized with size ${width}x${height}")
+        }
+    }
+
     private fun getInstalledApps(): List<Map<String, Any?>> {
         val apps = mutableListOf<Map<String, Any?>>()
         val packageManager = context.packageManager
@@ -833,9 +995,10 @@ class MainActivity : FlutterActivity() {
             val escapedComponent = componentString.replace("$", "\\$")
             
             // Command: am start -n <Component> --display <DisplayId> --windowingMode 1
-            // 0x800080 = FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS (0x800000) | FLAG_ACTIVITY_NO_HISTORY (0x80)
-            // 최근 앱 목록에 나타나지 않도록 설정
-            val cmd = "am start -n \"$escapedComponent\" --display $displayId --windowingMode 1 -f 0x800080"
+            // --activity-single-top: 기존 인스턴스 재사용
+            // --activity-clear-top: 위의 Activity들 제거
+            // --activity-reorder-to-front: 기존 Task를 앞으로
+            val cmd = "am start -n \"$escapedComponent\" --display $displayId --windowingMode 1 --activity-single-top --activity-clear-top --activity-reorder-to-front"
             Log.i(TAG, "Executing ROOT command (async): $cmd")
             
             // 비동기 실행 (결과 대기 안 함 - 프리셋 전환 최적화)
@@ -857,12 +1020,10 @@ class MainActivity : FlutterActivity() {
                 addCategory(Intent.CATEGORY_LAUNCHER)
                 setComponent(componentName)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                addFlags(Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
-                addFlags(Intent.FLAG_ACTIVITY_LAUNCH_ADJACENT)
-                // 최근 앱 목록에서 제외 (VirtualDisplay용)
-                addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS)
-                addFlags(Intent.FLAG_ACTIVITY_NO_HISTORY)
+                // 기존 인스턴스 재사용
+                addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
             }
             
             val options = ActivityOptions.makeBasic()
@@ -1110,6 +1271,12 @@ class MainActivity : FlutterActivity() {
     
     override fun onDestroy() {
         super.onDestroy()
+        
+        // Native PIP Manager 정리 (3개 Window 모두 제거)
+        nativePipManager?.release()
+        nativePipManager = null
+        Log.d(TAG, "Native PIP manager released")
+        
         // TaskManager 정리
         if (::taskManager.isInitialized) {
             taskManager.destroy()

@@ -8,10 +8,20 @@ import 'connectivity_service.dart';
 import 'preset_service.dart';
 import 'preset_editor.dart';
 import 'native_service.dart';
+import 'native_pip_service.dart';
 import 'theme/app_colors.dart';
 import 'theme/app_dimens.dart';
 import 'widgets/animations/bouncy_button.dart';
 import 'performance_monitor.dart';
+
+/// Native PIP 모드 사용 여부
+/// true: Native SurfaceView (XML 레이아웃 방법 B - 터치 직접 처리, 최고 성능)
+/// false: Flutter AndroidView (기존 방식)
+/// 
+/// 방법 B: FlutterView와 NativePipContainer를 XML에서 같은 레벨로 배치
+/// - FlutterView: 전체 화면 (Dock + 디버그바 + 제스처바 등)
+/// - NativePipContainer: 하단 PIP 영역만 (터치 직접 처리)
+const bool kUseNativePip = true;
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -57,6 +67,14 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   final PerformanceMonitor _perfMonitor = PerformanceMonitor();
   StreamSubscription<PerformanceData>? _perfSubscription;
   PerformanceData? _perfData;
+  
+  // Native PIP 서비스
+  final NativePipService _nativePipService = NativePipService();
+  bool _nativePipInitialized = false;
+
+  // 현재 실행 중인 앱 패키지명 (스마트 런칭용)
+  String? _currentPip1Package;
+  String? _currentPip2Package;
 
   @override
   void initState() {
@@ -92,7 +110,13 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     _refreshAppCache();
     
     // 디버그 정보 초기 로드 (타이머 제거 - 수동 새로고침만)
-    WidgetsBinding.instance.addPostFrameCallback((_) => _updateDebugInfo());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _updateDebugInfo();
+      // Native PIP 모드 초기화 (레이아웃 완료 후)
+      if (kUseNativePip) {
+        _initNativePip();
+      }
+    });
     
     // 성능 모니터 시작 (setState 최소화로 프레임 개선)
     _perfMonitor.start();
@@ -119,11 +143,69 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     _pipDrawerAnimController.dispose();
     _perfSubscription?.cancel();
     _perfMonitor.stop();
+    // Native PIP 정리
+    if (kUseNativePip) {
+      _nativePipService.disable();
+    }
     super.dispose();
   }
 
   void _onPresetChanged() {
-    setState(() {});
+    // Native PIP 모드의 비율 변경은 _launchPresetApps에서 setRatioAnimated로 처리
+    // setState 제거: 프리셋 버튼 UI는 PresetService.currentIndex를 직접 참조하므로
+    // 전체 HomeScreen rebuild가 필요 없음 (FPS 크게 개선)
+    // 필요 시 ValueListenableBuilder를 사용하여 프리셋 버튼만 업데이트
+  }
+  
+  /// Native PIP 모드 초기화 (방안 A - FrameLayout 오버레이)
+  Future<void> _initNativePip() async {
+    if (_nativePipInitialized) return;
+    
+    final mediaQuery = MediaQuery.of(context);
+    final screenSize = mediaQuery.size;
+    final devicePixelRatio = mediaQuery.devicePixelRatio;
+    
+    // 방안 A: FrameLayout 오버레이
+    // FlutterView: 전체 화면 (Dock 포함)
+    // NativePipContainer: Dock 오른쪽에 오버레이
+    // 
+    // Native가 전체 높이를 사용하고, Flutter PIP 영역은 투명하게 비움
+    
+    final screenWidthPx = (screenSize.width * devicePixelRatio).toInt();
+    final screenHeightPx = (screenSize.height * devicePixelRatio).toInt();
+    
+    // 방안 A: pipHeight는 전체 높이 (오버레이이므로 전체 사용)
+    final pipHeight = screenHeightPx;
+    
+    debugPrint('[HomeScreen] initNativePip (Method A - Overlay): screen=${screenWidthPx}x${screenHeightPx}');
+    
+    final success = await _nativePipService.enable(
+      screenWidth: screenWidthPx,
+      screenHeight: screenHeightPx,
+      pipHeight: pipHeight,
+    );
+    
+    if (success) {
+      _nativePipInitialized = true;
+      
+      // 초기 비율 설정
+      await _nativePipService.setRatio(_presetService.currentPreset.leftRatio);
+      
+      // 프리셋 앱 실행 (약간 지연시켜 VirtualDisplay 준비 대기)
+      await Future.delayed(const Duration(milliseconds: 500));
+      
+      final preset = _presetService.currentPreset;
+      if (preset.pip1.isNotEmpty) {
+        await _nativePipService.launchApp(0, preset.pip1.packageName!);
+      }
+      if (preset.pip2.isNotEmpty) {
+        await _nativePipService.launchApp(1, preset.pip2.packageName!);
+      }
+      
+      debugPrint('[HomeScreen] Native PIP initialized (Method A - Overlay)');
+    } else {
+      debugPrint('[HomeScreen] Native PIP init failed, using Flutter PIP');
+    }
   }
 
   void _updateTime() {
@@ -195,7 +277,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     final pip1Vd = pip1State?.virtualDisplayId?.toString() ?? '-';
     final pip2Vd = pip2State?.virtualDisplayId?.toString() ?? '-';
     
-    // 변경된 경우에만 setState
+    // 변경된 경우에만 setState (성능 중요!)
     if (_debugInfo['pip1_app'] != pip1App ||
         _debugInfo['pip2_app'] != pip2App ||
         _debugInfo['pip1_vd'] != pip1Vd ||
@@ -206,10 +288,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         _debugInfo['pip1_vd'] = pip1Vd;
         _debugInfo['pip2_vd'] = pip2Vd;
       });
-    } else {
-      // PIP 정보 변경 없으면 FPS만 갱신 (성능 최적화)
-      setState(() {});
     }
+    // FPS 정보 변경은 setState 호출 안 함 - 디버그 오버레이에서 직접 _perfData 참조
   }
   
   void _toggleDebugOverlay() {
@@ -345,6 +425,60 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   void _launchPresetApps(int index, {double? previousRatio}) {
     final preset = _presetService.presets[index];
     
+    // Native PIP 모드 (최적화된 시퀀스)
+    if (kUseNativePip && _nativePipInitialized) {
+      final prevRatio = previousRatio ?? preset.leftRatio;
+      final needsResize = (prevRatio - preset.leftRatio).abs() > 0.01;
+      
+      // 1. 비율 변경 (애니메이션 적용 - 부드러운 전환)
+      if (needsResize) {
+        // 애니메이션으로 비율 변경 (fire-and-forget, 150ms)
+        _nativePipService.setRatioAnimated(preset.leftRatio, durationMs: 150);
+      }
+      
+      // 2. 앱 실행 (스마트 런칭: 앱이 변경된 경우에만)
+      // 스태거드 런칭: 두 앱 동시 실행 시 시스템 부하를 분산
+      bool pip1NeedsLaunch = false;
+      bool pip2NeedsLaunch = false;
+      
+      if (preset.pip1.isNotEmpty) {
+        final newPackage = preset.pip1.packageName!;
+        if (newPackage != _currentPip1Package) {
+          pip1NeedsLaunch = true;
+          _currentPip1Package = newPackage;
+        }
+      }
+      
+      if (preset.pip2.isNotEmpty) {
+        final newPackage = preset.pip2.packageName!;
+        if (newPackage != _currentPip2Package) {
+          pip2NeedsLaunch = true;
+          _currentPip2Package = newPackage;
+        }
+      }
+      
+      // 스태거드 실행: PIP1 먼저, 100ms 후 PIP2 (시스템 부하 분산)
+      if (pip1NeedsLaunch) {
+        _nativePipService.launchApp(0, preset.pip1.packageName!);
+      }
+      if (pip2NeedsLaunch) {
+        if (pip1NeedsLaunch) {
+          // PIP1도 실행했으면 100ms 지연 후 PIP2 실행
+          Future.delayed(const Duration(milliseconds: 100), () {
+            _nativePipService.launchApp(1, preset.pip2.packageName!);
+          });
+        } else {
+          // PIP1 실행 안 했으면 바로 실행
+          _nativePipService.launchApp(1, preset.pip2.packageName!);
+        }
+      }
+      
+      // 3. Flutter UI setState는 호출하지 않음 (프리셋 버튼 선택 상태만 변경됨)
+      // _onPresetChanged() 리스너가 이미 호출됨
+      return;
+    }
+    
+    // Flutter PIP 모드 (기존 방식)
     // PIP 내 앱서랍 닫기
     _pip1Key.currentState?.closeInlineDrawer();
     _pip2Key.currentState?.closeInlineDrawer();
@@ -441,54 +575,28 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       body: SafeArea(
         child: Stack(
           children: [
+            // 방법 B: Flutter는 상단 영역만 담당 (15%)
+            // Native PIP가 하단 85% 담당 (Android LinearLayout에서 분리)
+            // 
+            // 그러나 Android에서 flutter_container가 weight=1로 
+            // 전체 - pipHeight 만큼 차지하므로
+            // Flutter 내부에서는 전체 영역을 사용해도 됨
+            // (Native PIP는 아예 다른 영역에 있음)
+            
             // 메인 레이아웃
             Row(
               children: [
                 // Left Navigation Bar (Dock) - 항상 고정
                 _buildDock(),
                 
-                // Right Area: 전체화면 VirtualDisplay (항상 존재) + PIP 오버레이
+                // Right Area: 
+                // - Native PIP 모드: 빈 공간 (제스처바만 표시)
+                // - Flutter PIP 모드: 기존 AndroidView PIP
+                // - 전체화면 모드: 전체화면 VirtualDisplay
                 Expanded(
-                  child: Stack(
-                    children: [
-                      // 전체화면 VirtualDisplay (항상 백그라운드에 존재)
-                      Positioned.fill(
-                        child: PipView(
-                          key: _fullscreenPipKey,
-                          displayId: 0,
-                          label: "",
-                          isFullscreen: true,
-                        ),
-                      ),
-                      
-                      // PIP 모드일 때만 2개 PIP 오버레이
-                      if (!_showFullscreenApp)
-                        Positioned.fill(
-                          child: _buildSplitPipArea(),
-                        ),
-                        
-                      // 앱 서랍 오버레이 (애니메이션 적용)
-                      if (_showAppDrawer)
-                        Positioned.fill(
-                          child: AnimatedBuilder(
-                            animation: _drawerAnimController,
-                            builder: (context, child) {
-                              return Transform.translate(
-                                offset: Offset(0, MediaQuery.of(context).size.height * _drawerSlideAnim.value),
-                                child: Opacity(
-                                  opacity: _drawerFadeAnim.value,
-                                  child: child,
-                                ),
-                              );
-                            },
-                            child: AppDrawerContent(
-                              onClose: _closeAppDrawer,
-                              onAppSelected: _launchFullscreenApp,
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
+                  child: kUseNativePip
+                      ? _buildNativePipFlutterArea()  // Native PIP 모드: 항상 투명 영역 (초기화 전에도)
+                      : _buildFlutterPipArea(),       // Flutter PIP 모드: 기존 방식
                 ),
               ],
             ),
@@ -511,12 +619,11 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   }
   
   /// 디버그 오버레이 위젯 (FPS/성능 지표 포함)
-  /// 그룹별로 구분: [성능] [PIP1 상세] [PIP2 상세] [레이아웃]
+  /// 컴팩트 모드: 좁은 화면에서 스크롤 가능하게
   Widget _buildDebugOverlay() {
     final perf = _perfData;
     final pip1 = _pip1Key.currentState;
     final pip2 = _pip2Key.currentState;
-    final fs = _fullscreenPipKey.currentState;
     
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
@@ -531,108 +638,81 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
           color: Colors.white,
           height: 1.3,
         ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // ═══════════════════════════════════════
-            // 그룹 1: 성능 (Performance)
-            // ═══════════════════════════════════════
-            _debugGroup(
-              title: '⚡ Performance',
-              color: Colors.amber,
-              children: [
-                _fpsLabel('FPS', perf?.fps ?? 0),
-                _debugLabel('Frame', '${perf?.avgFrameTimeMs.toStringAsFixed(1) ?? '-'}ms'),
-                _debugLabel('Drop', '${perf?.droppedFrames ?? 0}'),
-              ],
-            ),
-            const SizedBox(width: 8),
-            
-            // ═══════════════════════════════════════
-            // 그룹 2: PIP 1 (왼쪽 화면)
-            // ═══════════════════════════════════════
-            _debugGroup(
-              title: '🔵 PIP 1 (Left)',
-              color: Colors.blue,
-              children: [
-                _debugLabel('Display', 'VD${_debugInfo['pip1_vd'] ?? '-'}'),
-                _debugLabel('App', _debugInfo['pip1_app'] ?? '-'),
-                _debugLabel('Touch', '${pip1?.touchMoveCount ?? 0}', valueColor: Colors.greenAccent),
-              ],
-            ),
-            const SizedBox(width: 8),
-            
-            // ═══════════════════════════════════════
-            // 그룹 3: PIP 2 (오른쪽 화면)
-            // ═══════════════════════════════════════
-            _debugGroup(
-              title: '🟢 PIP 2 (Right)',
-              color: Colors.green,
-              children: [
-                _debugLabel('Display', 'VD${_debugInfo['pip2_vd'] ?? '-'}'),
-                _debugLabel('App', _debugInfo['pip2_app'] ?? '-'),
-                _debugLabel('Touch', '${pip2?.touchMoveCount ?? 0}', valueColor: Colors.greenAccent),
-              ],
-            ),
-            const SizedBox(width: 8),
-            
-            // ═══════════════════════════════════════
-            // 그룹 4: 전체화면 (Fullscreen)
-            // ═══════════════════════════════════════
-            if (_showFullscreenApp || _debugInfo['fs_app'] != null && _debugInfo['fs_app'] != '-')
-              Padding(
-                padding: const EdgeInsets.only(right: 8),
-                child: _debugGroup(
-                  title: '🟣 Fullscreen',
-                  color: Colors.purple,
-                  children: [
-                    _debugLabel('Display', 'VD${_debugInfo['fs_vd'] ?? '-'}'),
-                    _debugLabel('App', _debugInfo['fs_app'] ?? '-'),
-                  ],
-                ),
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // 성능
+              _debugGroup(
+                title: '⚡ Perf',
+                color: Colors.amber,
+                children: [
+                  _fpsLabel('FPS', perf?.fps ?? 0),
+                  _debugLabel('Frame', '${perf?.avgFrameTimeMs.toStringAsFixed(1) ?? '-'}ms'),
+                ],
               ),
-            
-            // ═══════════════════════════════════════
-            // 그룹 5: 레이아웃 정보
-            // ═══════════════════════════════════════
-            _debugGroup(
-              title: '📐 Layout',
-              color: Colors.cyan,
-              children: [
-                _debugLabel('Screen', _debugInfo['screen'] ?? '-'),
-                _debugLabel('Physical', _debugInfo['physical'] ?? '-'),
-                _debugLabel('Ratio', _debugInfo['pip_ratio'] ?? '-'),
-              ],
-            ),
-            const SizedBox(width: 8),
-            
-            // ═══════════════════════════════════════
-            // 그룹 6: 시스템 정보
-            // ═══════════════════════════════════════
-            _debugGroup(
-              title: '⚙️ System',
-              color: Colors.grey,
-              children: [
-                _debugLabel('DPR', _debugInfo['dpr'] ?? '-'),
-                _debugLabel('DPI', '${_debugInfo['dpi'] ?? '-'}'),
-                _debugLabel('Dock', _debugInfo['dock'] ?? '-'),
-              ],
-            ),
-            const SizedBox(width: 8),
-            
-            // ═══════════════════════════════════════
-            // 그룹 7: 상태 정보
-            // ═══════════════════════════════════════
-            _debugGroup(
-              title: '📋 State',
-              color: Colors.orange,
-              children: [
-                _debugLabel('Drawer', _debugInfo['drawer'] ?? '-'),
-                _debugLabel('FS', _debugInfo['fullscreen'] ?? '-'),
-                _debugLabel('Orient', _debugInfo['orientation'] ?? '-'),
-              ],
-            ),
-          ],
+              const SizedBox(width: 6),
+              
+              // PIP 1
+              _debugGroup(
+                title: '🔵 PIP1',
+                color: Colors.blue,
+                children: [
+                  _debugLabel('VD', _debugInfo['pip1_vd'] ?? '-'),
+                  _debugLabel('App', _debugInfo['pip1_app'] ?? '-'),
+                ],
+              ),
+              const SizedBox(width: 6),
+              
+              // PIP 2
+              _debugGroup(
+                title: '🟢 PIP2',
+                color: Colors.green,
+                children: [
+                  _debugLabel('VD', _debugInfo['pip2_vd'] ?? '-'),
+                  _debugLabel('App', _debugInfo['pip2_app'] ?? '-'),
+                ],
+              ),
+              const SizedBox(width: 6),
+              
+              // 전체화면 (조건부)
+              if (_showFullscreenApp)
+                Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: _debugGroup(
+                    title: '🟣 FS',
+                    color: Colors.purple,
+                    children: [
+                      _debugLabel('VD', _debugInfo['fs_vd'] ?? '-'),
+                      _debugLabel('App', _debugInfo['fs_app'] ?? '-'),
+                    ],
+                  ),
+                ),
+              
+              // 레이아웃
+              _debugGroup(
+                title: '📐 Layout',
+                color: Colors.cyan,
+                children: [
+                  _debugLabel('Scr', _debugInfo['screen'] ?? '-'),
+                  _debugLabel('Ratio', _debugInfo['pip_ratio'] ?? '-'),
+                ],
+              ),
+              const SizedBox(width: 6),
+              
+              // 상태
+              _debugGroup(
+                title: '📋 State',
+                color: Colors.orange,
+                children: [
+                  _debugLabel('Drawer', _showAppDrawer ? 'O' : 'X'),
+                  _debugLabel('FS', _showFullscreenApp ? 'O' : 'X'),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -736,11 +816,100 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     );
   }
   
-  /// 분할 PIP 영역 (2개 PIP) - 현재 프리셋 비율 적용 + 드래그 가능한 구분선 + 하단 제스처 바
+  /// 방법 B: Native PIP 모드에서 Flutter 영역 빌드
+  /// 방법 B에서는 LinearLayout이 화면을 분리:
+  /// - flutter_container: 위쪽 (이 영역) - 빈 공간
+  /// - native_pip_container: Dock 오른쪽 오버레이 - Native PIP
+  /// 
+  /// Flutter는 PIP 영역을 완전히 투명하게 비움 → Native가 보임
+  /// 터치도 Native로 통과 (IgnorePointer 사용)
+  /// 앱서랍 오버레이만 Flutter에서 처리
+  Widget _buildNativePipFlutterArea() {
+    // Native PIP 모드에서 Flutter는 투명 영역만 표시
+    // Native가 Dock 오른쪽에서 PIP를 렌더링
+    // IgnorePointer로 터치를 Native에게 전달
+    return Stack(
+      children: [
+        // 투명 영역 - 터치 통과 (Native PIP가 받음)
+        const IgnorePointer(
+          ignoring: true,
+          child: SizedBox.expand(),
+        ),
+          
+        // 앱 서랍 오버레이 (애니메이션 적용)
+        if (_showAppDrawer)
+          Positioned.fill(
+            child: AnimatedBuilder(
+              animation: _drawerAnimController,
+              builder: (context, child) {
+                return Transform.translate(
+                  offset: Offset(0, MediaQuery.of(context).size.height * _drawerSlideAnim.value),
+                  child: Opacity(
+                    opacity: _drawerFadeAnim.value,
+                    child: child,
+                  ),
+                );
+              },
+              child: AppDrawerContent(
+                onClose: _closeAppDrawer,
+                onAppSelected: _launchFullscreenApp,
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+  
+  /// 기존 Flutter PIP 영역 빌드 (AndroidView 방식)
+  Widget _buildFlutterPipArea() {
+    return Stack(
+      children: [
+        // 전체화면 VirtualDisplay (항상 백그라운드에 존재)
+        Positioned.fill(
+          child: PipView(
+            key: _fullscreenPipKey,
+            displayId: 0,
+            label: "",
+            isFullscreen: true,
+          ),
+        ),
+        
+        // PIP 모드일 때만 2개 PIP 오버레이
+        if (!_showFullscreenApp)
+          Positioned.fill(
+            child: _buildSplitPipArea(),
+          ),
+          
+        // 앱 서랍 오버레이 (애니메이션 적용)
+        if (_showAppDrawer)
+          Positioned.fill(
+            child: AnimatedBuilder(
+              animation: _drawerAnimController,
+              builder: (context, child) {
+                return Transform.translate(
+                  offset: Offset(0, MediaQuery.of(context).size.height * _drawerSlideAnim.value),
+                  child: Opacity(
+                    opacity: _drawerFadeAnim.value,
+                    child: child,
+                  ),
+                );
+              },
+              child: AppDrawerContent(
+                onClose: _closeAppDrawer,
+                onAppSelected: _launchFullscreenApp,
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+  
+  /// 분할 PIP 영역 (2개 PIP) - Flutter PIP 모드용
   /// 비율 전환 시 부드러운 애니메이션 적용
   Widget _buildSplitPipArea() {
     final preset = _presetService.currentPreset;
     
+    // Flutter PIP 모드 (기존 방식 - AndroidView 사용)
     return Container(
       color: AppColors.glassGrey,
       child: LayoutBuilder(
@@ -875,6 +1044,14 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   /// PIP에서 전체화면으로 전환
   void _launchFullscreenFromPip(GlobalKey<PipViewState> pipKey) {
     final currentPackage = pipKey.currentState?.currentPackage;
+    if (currentPackage != null) {
+      _launchFullscreenApp(currentPackage);
+    }
+  }
+  
+  /// Native PIP에서 전체화면으로 전환
+  void _launchFullscreenFromNativePip(int pipIndex) async {
+    final currentPackage = await _nativePipService.getCurrentPackage(pipIndex);
     if (currentPackage != null) {
       _launchFullscreenApp(currentPackage);
     }
@@ -1052,17 +1229,21 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                     ),
                   
                   // 정중앙: 프리셋 버튼들 (반응형 개수)
+                  // ListenableBuilder로 프리셋 변경 시 이 영역만 리빌드 (성능 최적화)
                   Expanded(
                     child: Center(
-                      child: SingleChildScrollView(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            for (int i = 0; i < presetsToShow; i++) ...[
-                              if (i > 0) SizedBox(height: isCompact ? 6 : 8),
-                              _buildPresetButton(i, presetSize),
+                      child: ListenableBuilder(
+                        listenable: _presetService,
+                        builder: (context, child) => SingleChildScrollView(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              for (int i = 0; i < presetsToShow; i++) ...[
+                                if (i > 0) SizedBox(height: isCompact ? 6 : 8),
+                                _buildPresetButton(i, presetSize),
+                              ],
                             ],
-                          ],
+                          ),
                         ),
                       ),
                     ),
@@ -1492,6 +1673,168 @@ class _PipGestureBarState extends State<_PipGestureBar> {
                   ),
                 ),
               // 메인 제스처 바 (즉각 반응)
+              Transform.translate(
+                offset: Offset(_dragOffsetX * 0.5, 0),
+                child: Container(
+                  width: _isActive ? 100 : 80,
+                  height: _isActive ? 5 : 4,
+                  decoration: BoxDecoration(
+                    color: _isActive 
+                        ? AppColors.carrotOrange 
+                        : (_isDragging && isBackDirection && dragProgress > 0.5)
+                            ? AppColors.carrotOrange.withOpacity(0.7)
+                            : (_isHovering ? Colors.white38 : Colors.white24),
+                    borderRadius: BorderRadius.circular(3),
+                    boxShadow: _isActive
+                        ? [
+                            BoxShadow(
+                              color: AppColors.carrotOrange.withOpacity(0.5),
+                              blurRadius: 8,
+                              spreadRadius: 1,
+                            )
+                          ]
+                        : [],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Native PIP 하단 제스처 바
+/// Flutter PIP 제스처바와 동일한 디자인이지만 Native PIP와 통신
+class _NativePipGestureBar extends StatefulWidget {
+  final int pipIndex;
+  final NativePipService nativePipService;
+  final VoidCallback onFullscreen;
+
+  const _NativePipGestureBar({
+    required this.pipIndex,
+    required this.nativePipService,
+    required this.onFullscreen,
+  });
+
+  @override
+  State<_NativePipGestureBar> createState() => _NativePipGestureBarState();
+}
+
+class _NativePipGestureBarState extends State<_NativePipGestureBar> {
+  bool _isActive = false;
+  bool _isHovering = false;
+  Timer? _longPressTimer;
+  double _dragOffsetX = 0;
+  bool _isDragging = false;
+  bool _backTriggered = false;
+
+  @override
+  void dispose() {
+    _longPressTimer?.cancel();
+    super.dispose();
+  }
+
+  void _resetState() {
+    _longPressTimer?.cancel();
+    _isDragging = false;
+    _dragOffsetX = 0;
+    _isActive = false;
+    _backTriggered = false;
+  }
+
+  void _onPanStart(DragStartDetails details) {
+    _resetState();
+    _isDragging = true;
+    _startLongPressTimer();
+    setState(() {});
+  }
+
+  void _onPanUpdate(DragUpdateDetails details) {
+    if (!_isDragging) return;
+    
+    setState(() {
+      _dragOffsetX = details.delta.dx + _dragOffsetX;
+      _dragOffsetX = _dragOffsetX.clamp(-60.0, 60.0);
+    });
+    
+    if (_dragOffsetX < -50 && !_backTriggered) {
+      _longPressTimer?.cancel();
+      _backTriggered = true;
+      _goBack();
+    }
+  }
+
+  void _onPanEnd(DragEndDetails details) {
+    if (!_isDragging) return;
+    
+    final wasActive = _isActive;
+    final velocity = details.velocity.pixelsPerSecond.dx;
+    
+    setState(() {
+      _resetState();
+    });
+    
+    if (wasActive) {
+      widget.onFullscreen();
+    } else if (velocity < -300 && !_backTriggered) {
+      _goBack();
+    }
+  }
+  
+  void _onPanCancel() {
+    setState(() {
+      _resetState();
+    });
+  }
+
+  void _startLongPressTimer() {
+    _longPressTimer?.cancel();
+    _longPressTimer = Timer(const Duration(milliseconds: 800), () {
+      if (mounted && _isDragging) {
+        setState(() => _isActive = true);
+        HapticFeedback.heavyImpact();
+      }
+    });
+  }
+
+  void _goBack() {
+    HapticFeedback.mediumImpact();
+    // Native PIP에 뒤로가기 명령 전송
+    widget.nativePipService.sendBackKey(widget.pipIndex);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final dragProgress = (_dragOffsetX.abs() / 50).clamp(0.0, 1.0);
+    final isBackDirection = _dragOffsetX < 0;
+    
+    return GestureDetector(
+      onPanStart: _onPanStart,
+      onPanUpdate: _onPanUpdate,
+      onPanEnd: _onPanEnd,
+      onPanCancel: _onPanCancel,
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _isHovering = true),
+        onExit: (_) => setState(() => _isHovering = false),
+        child: Container(
+          color: Colors.transparent,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              if (_isDragging && isBackDirection && dragProgress > 0.2)
+                Positioned(
+                  left: 8,
+                  child: Opacity(
+                    opacity: dragProgress,
+                    child: Icon(
+                      Icons.arrow_back_ios_rounded,
+                      color: AppColors.carrotOrange,
+                      size: 16,
+                    ),
+                  ),
+                ),
               Transform.translate(
                 offset: Offset(_dragOffsetX * 0.5, 0),
                 child: Container(

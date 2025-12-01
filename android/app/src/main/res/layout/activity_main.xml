@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    CarrotPlay Main Activity Layout (방안 A - 수평 오버레이)
+    
+    구조 (FrameLayout 오버레이):
+    ┌─────────────────────────────────────────────────────┐
+    │ FrameLayout (root)                                  │
+    │ ┌─────────────────────────────────────────────────┐ │
+    │ │ FlutterView (전체 화면)                         │ │
+    │ │ ┌────┬────────────────────────────────────────┐ │ │
+    │ │ │Dock│  Flutter 콘텐츠 (PIP 영역 = 투명)      │ │ │
+    │ │ │72dp│  - 디버그 오버레이                     │ │ │
+    │ │ │    │  - 앱서랍                              │ │ │
+    │ │ └────┴────────────────────────────────────────┘ │ │
+    │ └─────────────────────────────────────────────────┘ │
+    │ ┌─────────────────────────────────────────────────┐ │
+    │ │ NativePipContainer (Dock 오른쪽 오버레이)       │ │
+    │ │ marginStart=72dp                                │ │
+    │ │ ┌────────────────┐│┌────────────────┐          │ │
+    │ │ │     PIP 1      │││     PIP 2      │          │ │
+    │ │ │   SurfaceView  │││   SurfaceView  │          │ │
+    │ │ └────────────────┘│└────────────────┘          │ │
+    │ └─────────────────────────────────────────────────┘ │
+    └─────────────────────────────────────────────────────┘
+    
+    핵심: 
+    - FlutterView가 전체 화면 (Dock 포함)
+    - NativePipContainer가 Dock 오른쪽에 오버레이
+    - Flutter PIP 영역은 투명하게 비움 → Native가 보임
+    - 터치는 Native에서 직접 처리 (Flutter 우회)
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root_container"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#FF000000">
+
+    <!-- FlutterView 컨테이너 (전체 화면 - Dock + UI) -->
+    <FrameLayout
+        android:id="@+id/flutter_container"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- Native PIP 컨테이너 (Dock 오른쪽 오버레이) -->
+    <!-- marginStart=72dp로 Dock 영역 피함 -->
+    <FrameLayout
+        android:id="@+id/native_pip_container"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_marginStart="72dp"
+        android:visibility="gone" />
+
+</FrameLayout>
