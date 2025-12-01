@@ -36,8 +36,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17.toString()
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        }
     }
 
     defaultConfig {
@@ -56,7 +58,7 @@ android {
         }
     }
     
-    packagingOptions {
+    packaging {
         jniLibs {
             useLegacyPackaging = true  // .so 파일 압축 없이 저장
         }
@@ -72,7 +74,8 @@ android {
 }
 
 dependencies {
-    // SDK android.jar가 이미 Hidden API 버전으로 교체되어 별도 설정 불필요
+    // Java Stub 파일이 Hidden API 접근을 제공함 (AIDL + Stub 방식)
+    // libs/android.jar는 더 이상 필요 없음
 }
 
 flutter {

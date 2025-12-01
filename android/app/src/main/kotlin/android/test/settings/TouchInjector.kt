@@ -30,6 +30,32 @@ object TouchInjector {
     // 각 displayId별 downTime 추적 (원본 앱 방식)
     private val downTimeMap = mutableMapOf<Int, Long>()
     
+    // 터치 주입용 deviceId
+    // 0 = 가상 터치 장치 (시스템이 인식)
+    // 실제 터치스크린 ID를 사용하면 물리 터치와 충돌 가능
+    private var touchScreenDeviceId: Int = 0
+    
+    /**
+     * 시스템의 터치스크린 장치 ID를 찾습니다
+     */
+    private fun findTouchScreenDeviceId(): Int {
+        try {
+            val deviceIds = InputDevice.getDeviceIds()
+            for (id in deviceIds) {
+                val device = InputDevice.getDevice(id)
+                if (device != null && 
+                    (device.sources and InputDevice.SOURCE_TOUCHSCREEN) == InputDevice.SOURCE_TOUCHSCREEN) {
+                    Log.d(TAG, "Found touchscreen device: id=$id name=${device.name}")
+                    // 찾은 ID 반환 (실제 사용은 하지 않음)
+                    return id
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to find touchscreen device", e)
+        }
+        return 0
+    }
+    
     /**
      * 시스템 서비스 초기화
      */
@@ -44,6 +70,10 @@ object TouchInjector {
             // IWindowManager via WindowManagerGlobal - Hidden API
             windowManager = WindowManagerGlobal.getWindowManagerService()
             Log.d(TAG, "IWindowManager obtained: $windowManager")
+            
+            // 터치스크린 장치 ID 찾기
+            touchScreenDeviceId = findTouchScreenDeviceId()
+            Log.d(TAG, "Using touchscreen deviceId: $touchScreenDeviceId")
             
             isInitialized = inputManager != null && windowManager != null
             
@@ -121,6 +151,12 @@ object TouchInjector {
      * @param y 터치 Y 좌표
      * @param flutterDownTime Flutter의 downTime (사용 안함, Native에서 관리)
      * @param flutterEventTime Flutter의 eventTime (사용 안함, Native에서 관리)
+     * @param device Flutter PointerEvent의 device id (참고용 - 현재 터치스크린 deviceId 사용)
+     * @param pressure Flutter PointerEvent의 pressure
+     * @param size Flutter PointerEvent의 size
+     * @param source Flutter PointerEvent의 source 타입 (기본: TOUCHSCREEN)
+     * @param toolType Flutter PointerEvent의 tool type (기본: FINGER)
+     * @param pointerId Flutter PointerEvent의 pointer id
      */
     fun injectMotionEventFromFlutter(
         displayId: Int,
@@ -128,12 +164,27 @@ object TouchInjector {
         x: Float,
         y: Float,
         flutterDownTime: Long,
-        flutterEventTime: Long
+        flutterEventTime: Long,
+        device: Int = 0,
+        pressure: Float = 1.0f,
+        size: Float = 1.0f,
+        source: Int = InputDevice.SOURCE_TOUCHSCREEN,
+        toolType: Int = MotionEvent.TOOL_TYPE_FINGER,
+        pointerId: Int = 0
     ): Boolean {
         if (!isInitialized) {
             Log.w(TAG, "TouchInjector not initialized")
             return false
         }
+        
+        val actionName = when(action) {
+            0 -> "DOWN"
+            1 -> "UP"
+            2 -> "MOVE"
+            3 -> "CANCEL"
+            else -> "UNKNOWN($action)"
+        }
+        Log.d(TAG, "[NATIVE] injectMotionEvent action=$actionName displayId=$displayId pos=(${x.toInt()}, ${y.toInt()}) pressure=$pressure size=$size")
         
         try {
             val eventTime = SystemClock.uptimeMillis()
@@ -154,36 +205,69 @@ object TouchInjector {
                 }
             }
             
-            // MotionEvent 생성 (Native 시간 사용)
+            // PointerCoords 및 PointerProperties 설정 (Flutter에서 전달받은 값 사용)
+            val pointerProperties = MotionEvent.PointerProperties().apply {
+                id = pointerId
+                this.toolType = toolType
+            }
+            val pointerCoords = MotionEvent.PointerCoords().apply {
+                this.x = x
+                this.y = y
+                this.pressure = pressure
+                this.size = size
+            }
+            
+            // MotionEvent 생성 (실제 터치스크린 deviceId 사용)
+            // 원본 앱도 deviceId는 터치스크린의 실제 ID를 사용
             val motionEvent = MotionEvent.obtain(
                 downTime,
                 eventTime,
                 action,
-                x,
-                y,
-                0 // metaState
+                1, // pointerCount
+                arrayOf(pointerProperties),
+                arrayOf(pointerCoords),
+                0, // metaState
+                0, // buttonState
+                1.0f, // xPrecision
+                1.0f, // yPrecision
+                touchScreenDeviceId, // 실제 터치스크린 장치 ID 사용
+                0, // edgeFlags
+                InputDevice.SOURCE_TOUCHSCREEN, // 항상 TOUCHSCREEN 사용 (원본 앱 방식)
+                0 // flags
             )
             
             // displayId 설정
             setDisplayId(motionEvent, displayId)
-            motionEvent.source = InputDevice.SOURCE_TOUCHSCREEN
             
             val actionMasked = motionEvent.actionMasked
             
-            // 성능 최적화 (Option A):
-            // - MOVE 전 sync 제거 → IPC 호출 90% 감소
-            // - UP/CANCEL 후에만 sync → 최종 상태 동기화
-            // - 고정 레이아웃에서는 터치 정확도 영향 없음
-            // - 나중에 크기/위치 조절 기능 추가 시 resize() 후 sync 1회 추가 예정
+            // 원본 앱 방식 sync 로직 (z7/g.java의 b 메서드 그대로)
+            // boolean z5 = !motionEvent.isFromSource(8194) 
+            //     ? !(actionMasked == 0 || actionMasked == 5 || actionMasked == 9) 
+            //     : actionMasked == 7 || actionMasked == 2;
+            // 
+            // 터치스크린(SOURCE_TOUCHSCREEN)은 SOURCE_MOUSE(8194)가 아니므로:
+            // - DOWN(0), POINTER_DOWN(5), HOVER_ENTER(9)가 아닌 모든 이벤트 전에 sync
+            // - 즉 MOVE, UP, POINTER_UP, CANCEL, HOVER_MOVE 등 모든 이벤트 전에 sync
+            val needsSyncBefore = !(actionMasked == MotionEvent.ACTION_DOWN ||
+                                    actionMasked == MotionEvent.ACTION_POINTER_DOWN ||
+                                    actionMasked == MotionEvent.ACTION_HOVER_ENTER)
+            
+            // UP/POINTER_UP/CANCEL/HOVER_EXIT 후에 sync
             val needsSyncAfter = actionMasked == MotionEvent.ACTION_UP ||
                                  actionMasked == MotionEvent.ACTION_POINTER_UP ||
                                  actionMasked == MotionEvent.ACTION_CANCEL ||
                                  actionMasked == MotionEvent.ACTION_HOVER_EXIT
             
+            // 이벤트 전 동기화 (MOVE 전)
+            if (needsSyncBefore) {
+                syncInput()
+            }
+            
             // 이벤트 주입
             inject(motionEvent)
             
-            // 이벤트 후 동기화 (UP/CANCEL 시에만)
+            // 이벤트 후 동기화 (UP/CANCEL 후)
             if (needsSyncAfter) {
                 syncInput()
             }
@@ -265,38 +349,59 @@ object TouchInjector {
             return false
         }
         
+        Log.d(TAG, "[NATIVE] injectTap START displayId=$displayId pos=(${x.toInt()}, ${y.toInt()})")
+        
         try {
             val downTime = SystemClock.uptimeMillis()
+            
+            // PointerCoords 및 PointerProperties 설정
+            val pointerProperties = MotionEvent.PointerProperties().apply {
+                id = 0
+                toolType = MotionEvent.TOOL_TYPE_FINGER
+            }
+            val pointerCoords = MotionEvent.PointerCoords().apply {
+                this.x = x
+                this.y = y
+                pressure = 1.0f
+                size = 1.0f
+            }
             
             // ACTION_DOWN
             val downEvent = MotionEvent.obtain(
                 downTime, downTime,
                 MotionEvent.ACTION_DOWN,
-                x, y, 0
+                1, arrayOf(pointerProperties), arrayOf(pointerCoords),
+                0, 0, 1.0f, 1.0f, touchScreenDeviceId, 0,
+                InputDevice.SOURCE_TOUCHSCREEN, 0
             )
             setDisplayId(downEvent, displayId)
-            downEvent.source = InputDevice.SOURCE_TOUCHSCREEN
             
-            inject(downEvent)
+            val downResult = inject(downEvent)
+            Log.d(TAG, "[NATIVE] injectTap DOWN result=$downResult")
             
             // ACTION_UP
             val upTime = SystemClock.uptimeMillis()
+            pointerCoords.x = x
+            pointerCoords.y = y
+            
             val upEvent = MotionEvent.obtain(
                 downTime, upTime,
                 MotionEvent.ACTION_UP,
-                x, y, 0
+                1, arrayOf(pointerProperties), arrayOf(pointerCoords),
+                0, 0, 1.0f, 1.0f, touchScreenDeviceId, 0,
+                InputDevice.SOURCE_TOUCHSCREEN, 0
             )
             setDisplayId(upEvent, displayId)
-            upEvent.source = InputDevice.SOURCE_TOUCHSCREEN
             
             syncInput()
-            inject(upEvent)
+            val upResult = inject(upEvent)
             syncInput()
+            
+            Log.d(TAG, "[NATIVE] injectTap UP result=$upResult, elapsed=${upTime - downTime}ms")
             
             downEvent.recycle()
             upEvent.recycle()
             
-            Log.d(TAG, "Injected tap at ($x, $y) on display $displayId")
             return true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to inject tap", e)
@@ -318,14 +423,27 @@ object TouchInjector {
             val steps = 10
             val stepDuration = durationMs / steps
             
+            // PointerCoords 및 PointerProperties 설정
+            val pointerProperties = MotionEvent.PointerProperties().apply {
+                id = 0
+                toolType = MotionEvent.TOOL_TYPE_FINGER
+            }
+            val pointerCoords = MotionEvent.PointerCoords().apply {
+                x = x1
+                y = y1
+                pressure = 1.0f
+                size = 1.0f
+            }
+            
             // ACTION_DOWN
             val downEvent = MotionEvent.obtain(
                 downTime, downTime,
                 MotionEvent.ACTION_DOWN,
-                x1, y1, 0
+                1, arrayOf(pointerProperties), arrayOf(pointerCoords),
+                0, 0, 1.0f, 1.0f, touchScreenDeviceId, 0,
+                InputDevice.SOURCE_TOUCHSCREEN, 0
             )
             setDisplayId(downEvent, displayId)
-            downEvent.source = InputDevice.SOURCE_TOUCHSCREEN
             inject(downEvent)
             downEvent.recycle()
             
@@ -336,13 +454,17 @@ object TouchInjector {
                 val currentY = y1 + (y2 - y1) * progress
                 val eventTime = downTime + (stepDuration * i)
                 
+                pointerCoords.x = currentX
+                pointerCoords.y = currentY
+                
                 val moveEvent = MotionEvent.obtain(
                     downTime, eventTime,
                     MotionEvent.ACTION_MOVE,
-                    currentX, currentY, 0
+                    1, arrayOf(pointerProperties), arrayOf(pointerCoords),
+                    0, 0, 1.0f, 1.0f, touchScreenDeviceId, 0,
+                    InputDevice.SOURCE_TOUCHSCREEN, 0
                 )
                 setDisplayId(moveEvent, displayId)
-                moveEvent.source = InputDevice.SOURCE_TOUCHSCREEN
                 
                 syncInput()
                 inject(moveEvent)
@@ -353,13 +475,17 @@ object TouchInjector {
             
             // ACTION_UP
             val upTime = SystemClock.uptimeMillis()
+            pointerCoords.x = x2
+            pointerCoords.y = y2
+            
             val upEvent = MotionEvent.obtain(
                 downTime, upTime,
                 MotionEvent.ACTION_UP,
-                x2, y2, 0
+                1, arrayOf(pointerProperties), arrayOf(pointerCoords),
+                0, 0, 1.0f, 1.0f, touchScreenDeviceId, 0,
+                InputDevice.SOURCE_TOUCHSCREEN, 0
             )
             setDisplayId(upEvent, displayId)
-            upEvent.source = InputDevice.SOURCE_TOUCHSCREEN
             
             syncInput()
             inject(upEvent)
@@ -386,14 +512,27 @@ object TouchInjector {
         try {
             val downTime = SystemClock.uptimeMillis()
             
+            // PointerCoords 및 PointerProperties 설정
+            val pointerProperties = MotionEvent.PointerProperties().apply {
+                id = 0
+                toolType = MotionEvent.TOOL_TYPE_FINGER
+            }
+            val pointerCoords = MotionEvent.PointerCoords().apply {
+                this.x = x
+                this.y = y
+                pressure = 1.0f
+                size = 1.0f
+            }
+            
             // ACTION_DOWN
             val downEvent = MotionEvent.obtain(
                 downTime, downTime,
                 MotionEvent.ACTION_DOWN,
-                x, y, 0
+                1, arrayOf(pointerProperties), arrayOf(pointerCoords),
+                0, 0, 1.0f, 1.0f, touchScreenDeviceId, 0,
+                InputDevice.SOURCE_TOUCHSCREEN, 0
             )
             setDisplayId(downEvent, displayId)
-            downEvent.source = InputDevice.SOURCE_TOUCHSCREEN
             inject(downEvent)
             downEvent.recycle()
             
@@ -405,10 +544,11 @@ object TouchInjector {
             val upEvent = MotionEvent.obtain(
                 downTime, upTime,
                 MotionEvent.ACTION_UP,
-                x, y, 0
+                1, arrayOf(pointerProperties), arrayOf(pointerCoords),
+                0, 0, 1.0f, 1.0f, touchScreenDeviceId, 0,
+                InputDevice.SOURCE_TOUCHSCREEN, 0
             )
             setDisplayId(upEvent, displayId)
-            upEvent.source = InputDevice.SOURCE_TOUCHSCREEN
             
             syncInput()
             inject(upEvent)

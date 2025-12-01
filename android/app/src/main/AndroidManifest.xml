@@ -73,6 +73,15 @@
                     android:name="android.intent.category.DEFAULT"/>
             </intent-filter>
         </activity>
+        <!-- TransparentActivity - 다른 앱을 백그라운드로 보내기 위한 빈 Activity -->
+        <activity
+            android:name=".TransparentActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:launchMode="singleInstance"/>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

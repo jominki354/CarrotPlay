@@ -2,12 +2,24 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/rendering.dart';
 import 'native_service.dart';
 import 'app_selection_screen.dart';
 import 'app_drawer_content.dart';
 import 'package:get/get.dart';
 import 'dart:async';
 import 'dart:math' as math;
+
+/// PlatformView 사용 여부 플래그
+/// true: 원본 앱 방식 (Native에서 터치 처리, 100% 정확)
+/// false: 기존 방식 (Flutter Texture + Listener)
+/// 
+/// PlatformView 방식의 핵심:
+/// - AndroidView에서 gestureRecognizers를 설정하여 Flutter가 터치를 가로채지 않음
+/// - Native SurfaceView(AppViewSurface)에서 터치 직접 처리
+/// - 원본 MotionEvent의 deviceId, downTime, source 등 모든 속성 유지
+const bool kUsePlatformView = true;
 
 class PipView extends StatefulWidget {
   final int displayId; // Logical ID for our app (1 or 2, 0 for fullscreen)
@@ -30,11 +42,13 @@ class PipView extends StatefulWidget {
 class PipViewState extends State<PipView> with SingleTickerProviderStateMixin {
   int? _textureId;
   int? _virtualDisplayId;
+  int? _platformViewId; // PlatformView 모드에서 사용
   String? _currentPackage;
   String? _currentAppName;
   bool _isInitializing = false;
   String? _errorMessage;
   bool _initialized = false;
+  bool _isLaunching = false; // 앱 실행 중 상태 (topActivity 체크 무시용)
   
   // PIP 내 앱 서랍 표시 모드
   bool _showInlinePipDrawer = false;
@@ -45,6 +59,23 @@ class PipViewState extends State<PipView> with SingleTickerProviderStateMixin {
   
   /// 외부에서 VirtualDisplay ID에 접근할 수 있는 getter
   int? get virtualDisplayId => _virtualDisplayId;
+  
+  // 터치 카운터 (성능 측정용)
+  int _touchDownCount = 0;
+  int _touchMoveCount = 0;
+  int _touchUpCount = 0;
+  
+  /// 터치 카운터 getter
+  int get touchDownCount => _touchDownCount;
+  int get touchMoveCount => _touchMoveCount;
+  int get touchUpCount => _touchUpCount;
+  
+  /// 터치 카운터 리셋
+  void resetTouchCounters() {
+    _touchDownCount = 0;
+    _touchMoveCount = 0;
+    _touchUpCount = 0;
+  }
   
   /// 앱 종료 시 호출 - 투명 상태로 복귀
   void clearApp() {
@@ -97,18 +128,29 @@ class PipViewState extends State<PipView> with SingleTickerProviderStateMixin {
   }
   
   /// 외부에서 VirtualDisplay 크기 재조정 (비율 변경 시)
+  /// totalWidth는 이미 Dock이 제외된 콘텐츠 영역 너비
   Future<void> resizeToFit(double widthRatio, double totalWidth, double totalHeight, double devicePixelRatio) async {
     if (_virtualDisplayId == null || !_initialized) return;
     
-    // 새 크기 계산 (Dock 72px, 구분선 8px, 마진 4px 고려)
-    final contentWidth = totalWidth - 72 - 8; // Dock 제외, 구분선 제외
-    final pipWidth = contentWidth * widthRatio - 8; // 마진 고려
+    // 새 크기 계산 (totalWidth는 이미 Dock 제외됨, 구분선 8px만 추가 제거)
+    final pipWidth = (totalWidth - 8) * widthRatio - 8; // 구분선 + 마진 고려
     final pipHeight = totalHeight - 24 - 8; // 하단 제스처바 + 마진
     
     final newWidth = (pipWidth * devicePixelRatio).toInt();
     final newHeight = (pipHeight * devicePixelRatio).toInt();
     
-    if (newWidth <= 0 || newHeight <= 0) return;
+    print("resizeToFit: widthRatio=$widthRatio, totalWidth=$totalWidth -> pipWidth=$pipWidth, newWidth=$newWidth");
+    
+    if (newWidth <= 0 || newHeight <= 0) {
+      print("resizeToFit: invalid size, skipping");
+      return;
+    }
+    
+    // 이미 같은 크기면 skip (중복 호출 방지)
+    if (newWidth == _virtualDisplayWidth && newHeight == _virtualDisplayHeight) {
+      print("resizeToFit: same size, skipping");
+      return;
+    }
     
     final targetDpi = (160 * devicePixelRatio).toInt();
     
@@ -129,6 +171,35 @@ class PipViewState extends State<PipView> with SingleTickerProviderStateMixin {
         _currentDisplayHeight = newHeight;
       });
     }
+  }
+  
+  /// 비동기 크기 재조정 (결과 대기 없음 - 프리셋 전환 최적화용)
+  void resizeToFitAsync(double widthRatio, double totalWidth, double totalHeight, double devicePixelRatio) {
+    if (_virtualDisplayId == null || !_initialized) return;
+    
+    final pipWidth = (totalWidth - 8) * widthRatio - 8;
+    final pipHeight = totalHeight - 24 - 8;
+    
+    final newWidth = (pipWidth * devicePixelRatio).toInt();
+    final newHeight = (pipHeight * devicePixelRatio).toInt();
+    
+    if (newWidth <= 0 || newHeight <= 0) return;
+    if (newWidth == _virtualDisplayWidth && newHeight == _virtualDisplayHeight) return;
+    
+    final targetDpi = (160 * devicePixelRatio).toInt();
+    
+    // UI 상태 먼저 업데이트 (즉시)
+    if (mounted) {
+      setState(() {
+        _virtualDisplayWidth = newWidth;
+        _virtualDisplayHeight = newHeight;
+        _currentDisplayWidth = newWidth;
+        _currentDisplayHeight = newHeight;
+      });
+    }
+    
+    // Native resize는 백그라운드에서 (결과 대기 안 함)
+    NativeService.resizeVirtualDisplay(_virtualDisplayId!, newWidth, newHeight, targetDpi);
   }
   
   // 터치 관련
@@ -152,6 +223,15 @@ class PipViewState extends State<PipView> with SingleTickerProviderStateMixin {
   int _lastMoveTime = 0;
   static const int _moveThrottleMs = 8; // ~120fps (고반응성)
   
+  // 탭 감지용 (Phase 2)
+  Offset? _downPosition; // DOWN 시점 위치
+  static const double _tapThreshold = 15.0; // 탭으로 인식할 최대 이동 거리
+  
+  // 원본 PointerEvent 속성 저장 (원본 앱 방식 - UP에서 사용)
+  int _lastDevice = 0;
+  double _lastPressure = 1.0;
+  double _lastSize = 1.0;
+  
   // PIP 크기/DPI 조절 (원본 앱 방식)
   double _scaleFactor = 1.0; // 0.5 ~ 1.5
   static const double _minScale = 0.5;
@@ -171,24 +251,38 @@ class PipViewState extends State<PipView> with SingleTickerProviderStateMixin {
       }
     });
     
-    // 앱 종료 감지 타이머 (전체화면 모드가 아닐 때만) - 100ms마다 체크 (실시간)
+    // 앱 종료 감지 타이머 (전체화면 모드가 아닐 때만) - 500ms마다 체크 (성능 최적화)
     if (!widget.isFullscreen) {
-      _appCheckTimer = Timer.periodic(const Duration(milliseconds: 100), (_) => _checkAppRunning());
+      _appCheckTimer = Timer.periodic(const Duration(milliseconds: 500), (_) => _checkAppRunning());
     }
   }
   
   /// 앱이 여전히 실행 중인지 확인
+  /// topActivity가 없으면 투명으로, 다른 앱이면 그 앱으로 업데이트
   Future<void> _checkAppRunning() async {
-    if (_virtualDisplayId == null || _currentPackage == null) return;
+    // 앱 실행 중이거나 현재 패키지가 없으면 무시
+    if (_virtualDisplayId == null || _currentPackage == null || _isLaunching) return;
     
     final topActivity = await NativeService.getTopActivity(_virtualDisplayId!);
     
-    // 앱이 없거나 다른 앱으로 변경된 경우 즉시 투명으로
+    // topActivity가 null이거나 비어있으면 앱 종료됨 -> 투명으로
     if (topActivity == null || topActivity.isEmpty) {
-      if (mounted && _currentPackage != null) {
+      if (mounted) {
         setState(() {
           _currentPackage = null;
           _currentAppName = null;
+        });
+      }
+      return;
+    }
+    
+    // topActivity가 현재 앱과 다르면 -> 그 앱으로 업데이트 (forceStop 안 함)
+    if (!topActivity.startsWith(_currentPackage!)) {
+      final actualPackage = topActivity.split('/').first;
+      if (mounted && actualPackage.isNotEmpty) {
+        setState(() {
+          _currentPackage = actualPackage;
+          _currentAppName = actualPackage.split('.').last;
         });
       }
     }
@@ -269,6 +363,21 @@ class PipViewState extends State<PipView> with SingleTickerProviderStateMixin {
       
       print("Target DPI: $targetDpi (devicePixelRatio: $devicePixelRatio)");
       
+      // PlatformView 모드: 크기만 저장하고 AndroidView가 VirtualDisplay 생성
+      if (kUsePlatformView) {
+        setState(() {
+          _virtualDisplayWidth = width;
+          _virtualDisplayHeight = height;
+          _currentDisplayWidth = width;
+          _currentDisplayHeight = height;
+          _isInitializing = false;
+          // _initialized는 PlatformView에서 displayId를 받으면 true로 설정
+        });
+        print("PlatformView mode: waiting for AndroidView to create display");
+        return;
+      }
+      
+      // 기존 Texture 모드
       final result = await NativeService.createVirtualDisplay(width, height, targetDpi);
       
       if (result == null) {
@@ -297,7 +406,8 @@ class PipViewState extends State<PipView> with SingleTickerProviderStateMixin {
   }
 
   Future<void> _selectApp() async {
-    if (_virtualDisplayId == null) {
+    // PlatformView 모드에서는 displayId가 없을 수 있음 (아직 생성 전)
+    if (!kUsePlatformView && _virtualDisplayId == null) {
       print("VirtualDisplay not ready");
       return;
     }
@@ -309,14 +419,22 @@ class PipViewState extends State<PipView> with SingleTickerProviderStateMixin {
         final appName = result['appName'] as String?;
         
         if (packageName != null) {
-          print("Launching $packageName on display $_virtualDisplayId");
+          print("Launching $packageName on display $_virtualDisplayId (platformViewId=$_platformViewId)");
           
           setState(() {
             _currentPackage = packageName;
             _currentAppName = appName ?? packageName;
           });
           
-          final success = await NativeService.launchApp(packageName, _virtualDisplayId!);
+          bool success = false;
+          
+          // PlatformView 모드
+          if (kUsePlatformView && _platformViewId != null) {
+            success = await _launchAppViaPlatformView(packageName);
+          } else if (_virtualDisplayId != null) {
+            // 기존 Texture 모드
+            success = await NativeService.launchApp(packageName, _virtualDisplayId!);
+          }
           
           if (!success) {
             print("Failed to launch $appName");
@@ -329,29 +447,58 @@ class PipViewState extends State<PipView> with SingleTickerProviderStateMixin {
       print("Error selecting/launching app: $e");
     }
   }
+  
+  /// PlatformView를 통해 앱 실행
+  Future<bool> _launchAppViaPlatformView(String packageName) async {
+    if (_platformViewId == null) return false;
+    
+    const channel = MethodChannel('android.test.settings/virtual_display_view_channel');
+    try {
+      final result = await channel.invokeMethod<bool>('launchApp', {
+        'viewId': _platformViewId,
+        'packageName': packageName,
+      });
+      return result ?? false;
+    } catch (e) {
+      print("Failed to launch app via PlatformView: $e");
+      return false;
+    }
+  }
 
   /// 프리셋에서 앱 실행 (외부 호출용)
   /// VirtualDisplay가 준비될 때까지 대기 후 실행
   Future<void> launchAppWithConfig(String packageName, {double scale = 1.0}) async {
-    // VirtualDisplay가 준비될 때까지 최대 3초 대기
+    // PlatformView 모드: displayId가 준비될 때까지 대기
     int waitCount = 0;
-    while (_virtualDisplayId == null && waitCount < 30) {
-      print("Waiting for VirtualDisplay... ($waitCount)");
-      await Future.delayed(const Duration(milliseconds: 100));
-      waitCount++;
+    if (kUsePlatformView) {
+      while (_virtualDisplayId == null && waitCount < 50) {
+        print("Waiting for PlatformView displayId... ($waitCount)");
+        await Future.delayed(const Duration(milliseconds: 100));
+        waitCount++;
+      }
+    } else {
+      // 기존 Texture 모드
+      while (_virtualDisplayId == null && waitCount < 30) {
+        print("Waiting for VirtualDisplay... ($waitCount)");
+        await Future.delayed(const Duration(milliseconds: 100));
+        waitCount++;
+      }
     }
     
-    if (_virtualDisplayId == null) {
+    if (_virtualDisplayId == null && !kUsePlatformView) {
       print("VirtualDisplay not ready for $packageName after waiting");
       return;
     }
 
     try {
-      print("Launching $packageName on display $_virtualDisplayId with scale $scale");
+      // 앱 실행 중 상태 설정 (_checkAppRunning 무시)
+      _isLaunching = true;
       
-      // 스케일 적용
+      print("Launching $packageName on display $_virtualDisplayId (platformView=$kUsePlatformView) with scale $scale");
+      
+      // 스케일 적용 - DPI도 함께 조정 (변경된 경우에만)
       final targetScale = scale.clamp(_minScale, _maxScale);
-      if (targetScale != _scaleFactor) {
+      if ((targetScale - _scaleFactor).abs() > 0.01) {
         await _applyScaleValue(targetScale);
       }
       
@@ -360,27 +507,99 @@ class PipViewState extends State<PipView> with SingleTickerProviderStateMixin {
         _currentAppName = packageName.split('.').last;
       });
       
-      final success = await NativeService.launchApp(packageName, _virtualDisplayId!);
+      bool success = false;
+      
+      // PlatformView 모드
+      if (kUsePlatformView && _platformViewId != null) {
+        success = await _launchAppViaPlatformView(packageName);
+      } else if (_virtualDisplayId != null) {
+        // 기존 Texture 모드
+        success = await NativeService.launchApp(packageName, _virtualDisplayId!);
+      }
       
       if (!success) {
         print("Failed to launch $packageName");
       } else {
         print("Successfully launched $packageName");
       }
+      
+      // 앱이 실행될 시간을 주고 _isLaunching 해제 (1.5초 후)
+      Future.delayed(const Duration(milliseconds: 1500), () {
+        _isLaunching = false;
+      });
     } catch (e) {
       print("Error launching app with config: $e");
+      _isLaunching = false;
     }
+  }
+  
+  /// 빠른 앱 실행 (프리셋 전환 최적화용 - 대기 없음)
+  /// VirtualDisplay가 이미 준비되어 있다고 가정하고 바로 실행
+  void launchAppWithConfigFast(String packageName, {double scale = 1.0}) {
+    // displayId가 없으면 일반 버전으로 fallback
+    if (_virtualDisplayId == null) {
+      launchAppWithConfig(packageName, scale: scale);
+      return;
+    }
+    
+    // 앱 실행 중 상태 설정
+    _isLaunching = true;
+    
+    // UI 상태 즉시 업데이트
+    if (mounted) {
+      setState(() {
+        _currentPackage = packageName;
+        _currentAppName = packageName.split('.').last;
+      });
+    }
+    
+    // 스케일이 다르면 적용 (비동기, 대기 안 함)
+    final targetScale = scale.clamp(_minScale, _maxScale);
+    if ((targetScale - _scaleFactor).abs() > 0.01) {
+      _applyScaleValueFast(targetScale);
+    }
+    
+    // 앱 실행 (비동기, 대기 안 함)
+    if (kUsePlatformView && _platformViewId != null) {
+      _launchAppViaPlatformView(packageName);
+    } else {
+      NativeService.launchApp(packageName, _virtualDisplayId!);
+    }
+    
+    // 1.5초 후 _isLaunching 해제
+    Future.delayed(const Duration(milliseconds: 1500), () {
+      _isLaunching = false;
+    });
+  }
+  
+  /// 빠른 스케일 적용 (대기 없음)
+  void _applyScaleValueFast(double newScale) {
+    if (_virtualDisplayId == null || _virtualDisplayWidth == 0) return;
+    
+    final newWidth = (_virtualDisplayWidth * newScale).toInt();
+    final newHeight = (_virtualDisplayHeight * newScale).toInt();
+    final newDensity = (160 * newScale).toInt();
+    
+    // 상태 즉시 업데이트
+    _scaleFactor = newScale;
+    
+    // Native 호출 (대기 안 함)
+    NativeService.resizeVirtualDisplay(_virtualDisplayId!, newWidth, newHeight, newDensity);
   }
 
   /// 스케일 값을 적용하는 내부 메서드
+  /// 스케일이 커지면 해상도가 커지고 DPI도 비례해서 증가
   Future<void> _applyScaleValue(double newScale) async {
     if (_virtualDisplayId == null || _virtualDisplayWidth == 0 || _virtualDisplayHeight == 0) return;
     
     final newWidth = (_virtualDisplayWidth * newScale).toInt();
     final newHeight = (_virtualDisplayHeight * newScale).toInt();
     
-    // DPI는 160 고정 (자연스러운 앱 크기 유지)
-    const newDensity = 160;
+    // DPI도 스케일에 비례하여 조정 (기본 160 기준)
+    // scale 1.0 = 160dpi, scale 1.5 = 240dpi, scale 2.0 = 320dpi
+    final newDensity = (160 * newScale).toInt();
+    
+    print("Applying scale $newScale: ${newWidth}x$newHeight @ ${newDensity}dpi");
     
     final success = await NativeService.resizeVirtualDisplay(
       _virtualDisplayId!,
@@ -732,8 +951,18 @@ class PipViewState extends State<PipView> with SingleTickerProviderStateMixin {
       );
     }
 
-    if (_isInitializing || _textureId == null) {
+    if (_isInitializing) {
       // 초기화 중: 투명 배경
+      return const SizedBox.expand();
+    }
+    
+    // PlatformView 모드: AndroidView 사용 (원본 앱 방식)
+    if (kUsePlatformView) {
+      return _buildPlatformViewContent();
+    }
+    
+    // 기존 Texture 모드
+    if (_textureId == null) {
       return const SizedBox.expand();
     }
     
@@ -744,35 +973,106 @@ class PipViewState extends State<PipView> with SingleTickerProviderStateMixin {
       );
     }
 
-    // 터치 가능한 Texture 뷰 - Listener로 실시간 이벤트 처리 (원본 앱 방식)
-    return Stack(
-      children: [
-        // Texture 뷰
-        Positioned.fill(
-          child: Listener(
-            behavior: HitTestBehavior.opaque,
-            onPointerDown: _onPointerDown,
-            onPointerMove: _onPointerMove,
-            onPointerUp: _onPointerUp,
-            onPointerCancel: _onPointerCancel,
-            child: Texture(textureId: _textureId!),
-          ),
-        ),
-        
-        // 터치 포인터 시각화 오버레이
-        if (_isPointerDown && _currentPointerPosition != null)
-          Positioned.fill(
-            child: IgnorePointer(
-              child: CustomPaint(
-                painter: TouchPointerPainter(
-                  position: _currentPointerPosition!,
-                  trail: List.from(_pointerTrail),
-                ),
-              ),
-            ),
-          ),
-      ],
+    // 터치 가능한 Texture 뷰 - Listener로 실시간 이벤트 처리
+    // 포인터 시각화 제거로 성능 대폭 개선
+    return Listener(
+      behavior: HitTestBehavior.opaque,
+      onPointerDown: _onPointerDown,
+      onPointerMove: _onPointerMove,
+      onPointerUp: _onPointerUp,
+      onPointerCancel: _onPointerCancel,
+      child: Texture(textureId: _textureId!),
     );
+  }
+  
+  /// PlatformView 방식의 VirtualDisplay 콘텐츠
+  /// Native에서 터치를 직접 처리하므로 100% 정확한 터치 인식
+  Widget _buildPlatformViewContent() {
+    // 앱이 실행되지 않은 경우: 중앙에 앱 선택 버튼 표시
+    if (_currentPackage == null && !widget.isFullscreen && _virtualDisplayId != null) {
+      return Stack(
+        children: [
+          // PlatformView 배경 (투명)
+          _buildAndroidView(),
+          // 앱 선택 버튼 오버레이
+          Center(child: _buildAppSelectButton()),
+        ],
+      );
+    }
+    
+    // PlatformView만 표시 (터치는 Native에서 처리)
+    return _buildAndroidView();
+  }
+  
+  /// AndroidView 빌드 (PlatformView)
+  /// 고유한 key를 부여하여 불필요한 rebuild로 인한 재생성 방지
+  /// 
+  /// 핵심: gestureRecognizers를 EagerGestureRecognizer로 설정하여
+  /// Flutter가 터치를 가로채지 않고 Native SurfaceView에서 직접 처리하도록 함
+  Widget _buildAndroidView() {
+    final creationParams = <String, dynamic>{
+      'width': _currentDisplayWidth > 0 ? _currentDisplayWidth : 1080,
+      'height': _currentDisplayHeight > 0 ? _currentDisplayHeight : 1920,
+      'dpi': 320,
+      // 슬롯 인덱스 전달: VirtualDisplay 캐싱에 사용
+      // PlatformView가 재생성되어도 기존 VirtualDisplay 재사용
+      'slotIndex': widget.displayId,
+    };
+    
+    return AndroidView(
+      // 중요: displayId 기반 고유 key로 rebuild 시 재생성 방지
+      key: ValueKey('vd_${widget.displayId}_${widget.label}'),
+      viewType: 'android.test.settings/virtual_display_view',
+      creationParams: creationParams,
+      creationParamsCodec: const StandardMessageCodec(),
+      onPlatformViewCreated: _onPlatformViewCreated,
+      // 핵심: EagerGestureRecognizer를 사용하여 모든 터치를 Native로 전달
+      // 원본 앱 방식: Flutter가 터치를 가로채지 않고 Native에서 직접 처리
+      gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
+        Factory<OneSequenceGestureRecognizer>(
+          () => EagerGestureRecognizer(),
+        ),
+      },
+    );
+  }
+  
+  /// PlatformView 생성 완료 콜백
+  void _onPlatformViewCreated(int viewId) async {
+    print('[PipView] PlatformView created: viewId=$viewId');
+    _platformViewId = viewId;
+    
+    // displayId 가져오기
+    await _waitForPlatformViewDisplayId();
+  }
+  
+  /// PlatformView의 displayId가 준비될 때까지 대기
+  Future<void> _waitForPlatformViewDisplayId() async {
+    const channel = MethodChannel('android.test.settings/virtual_display_view_channel');
+    
+    for (int i = 0; i < 50; i++) { // 최대 5초 대기
+      try {
+        final displayId = await channel.invokeMethod<int>('getDisplayId', {
+          'viewId': _platformViewId,
+        });
+        
+        if (displayId != null && displayId > 0) {
+          print('[PipView] PlatformView display ready: displayId=$displayId');
+          setState(() {
+            _virtualDisplayId = displayId;
+            _initialized = true;
+          });
+          return;
+        }
+      } catch (e) {
+        print('[PipView] Waiting for PlatformView displayId... (attempt ${i + 1})');
+      }
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+    
+    print('[PipView] Failed to get PlatformView displayId after 5 seconds');
+    setState(() {
+      _errorMessage = 'PlatformView display creation failed';
+    });
   }
 
   // ============================================
@@ -801,17 +1101,22 @@ class PipViewState extends State<PipView> with SingleTickerProviderStateMixin {
     
     final vdPos = _localToVirtualDisplay(event.localPosition, _cachedViewSize!);
     
-    setState(() {
-      _isPointerDown = true;
-      _currentPointerPosition = event.localPosition;
-      _pointerTrail.clear();
-      _pointerTrail.add(event.localPosition);
-    });
+    // 탭 감지용 DOWN 위치 저장
+    _downPosition = vdPos;
+    _isPointerDown = true;
     
-    // 컨트롤 표시
+    // 원본 PointerEvent 속성 저장 (원본 앱 방식)
+    _lastDevice = event.device;
+    _lastPressure = event.pressure;
+    _lastSize = event.size;
+    
+    // 디버그 로그
+    print('[TOUCH] DOWN displayId=$_virtualDisplayId pos=(${vdPos.dx.toInt()}, ${vdPos.dy.toInt()}) device=${event.device}');
+    
+    // 컨트롤 표시 (setState 최소화)
     _showControlsTemporarily();
     
-    // ACTION_DOWN 즉시 전송 (fire-and-forget, await 안 함)
+    // ACTION_DOWN 전송 - 원본 PointerEvent의 속성 전달
     NativeService.injectMotionEvent(
       _virtualDisplayId!,
       0, // ACTION_DOWN
@@ -819,6 +1124,9 @@ class PipViewState extends State<PipView> with SingleTickerProviderStateMixin {
       vdPos.dy,
       0, // Native에서 관리
       0,
+      device: event.device,
+      pressure: event.pressure > 0 ? event.pressure : 1.0,
+      size: event.size > 0 ? event.size : 1.0,
     );
   }
 
@@ -833,16 +1141,7 @@ class PipViewState extends State<PipView> with SingleTickerProviderStateMixin {
     
     final vdPos = _localToVirtualDisplay(event.localPosition, _cachedViewSize!);
     
-    // 포인터 시각화 업데이트 (setState 없이 직접 수정 후 repaint)
-    _currentPointerPosition = event.localPosition;
-    _pointerTrail.add(event.localPosition);
-    if (_pointerTrail.length > _maxTrailLength) {
-      _pointerTrail.removeAt(0);
-    }
-    // CustomPainter만 다시 그리기 (전체 위젯 리빌드 방지)
-    (context as Element).markNeedsBuild();
-    
-    // ACTION_MOVE 전송 (fire-and-forget)
+    // ACTION_MOVE 전송 - 원본 PointerEvent의 속성 전달
     NativeService.injectMotionEvent(
       _virtualDisplayId!,
       2, // ACTION_MOVE
@@ -850,6 +1149,9 @@ class PipViewState extends State<PipView> with SingleTickerProviderStateMixin {
       vdPos.dy,
       0, // Native에서 관리
       0,
+      device: event.device,
+      pressure: event.pressure > 0 ? event.pressure : 1.0,
+      size: event.size > 0 ? event.size : 1.0,
     );
   }
 
@@ -858,22 +1160,30 @@ class PipViewState extends State<PipView> with SingleTickerProviderStateMixin {
     
     final vdPos = _localToVirtualDisplay(event.localPosition, _cachedViewSize!);
     
-    // ACTION_UP 전송 (fire-and-forget)
+    // 탭 감지: DOWN과 UP 거리가 threshold 이내
+    final isTap = _downPosition != null && 
+        (vdPos - _downPosition!).distance < _tapThreshold;
+    
+    // 디버그 로그
+    final distance = _downPosition != null ? (vdPos - _downPosition!).distance : 0.0;
+    print('[TOUCH] UP displayId=$_virtualDisplayId pos=(${vdPos.dx.toInt()}, ${vdPos.dy.toInt()}) distance=${distance.toInt()} isTap=$isTap device=${event.device}');
+    
+    // ACTION_UP 전송 - 원본 PointerEvent의 속성 전달
     NativeService.injectMotionEvent(
       _virtualDisplayId!,
       1, // ACTION_UP
       vdPos.dx,
       vdPos.dy,
-      0, // Native에서 관리
       0,
+      0,
+      device: event.device,
+      pressure: _lastPressure > 0 ? _lastPressure : 1.0,
+      size: _lastSize > 0 ? _lastSize : 1.0,
     );
     
-    setState(() {
-      _isPointerDown = false;
-      _currentPointerPosition = null;
-      _pointerTrail.clear();
-    });
-    
+    // 상태 리셋 (setState 제거 - 포인터 시각화 안 함)
+    _isPointerDown = false;
+    _downPosition = null;
     _cachedViewSize = null;
   }
 
@@ -888,16 +1198,13 @@ class PipViewState extends State<PipView> with SingleTickerProviderStateMixin {
       3, // ACTION_CANCEL
       vdPos.dx,
       vdPos.dy,
-      0, // Native에서 관리
+      0,
       0,
     );
     
-    setState(() {
-      _isPointerDown = false;
-      _currentPointerPosition = null;
-      _pointerTrail.clear();
-    });
-    
+    // 상태 리셋 (setState 제거)
+    _isPointerDown = false;
+    _downPosition = null;
     _cachedViewSize = null;
   }
 

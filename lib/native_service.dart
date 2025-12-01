@@ -94,7 +94,7 @@ class NativeService {
   // Touch Injection (System API 우선, Root fallback)
   // ============================================
   
-  /// 실시간 MotionEvent 주입 (최적화 버전)
+  /// 실시간 MotionEvent 주입 (원본 앱 방식 - 전체 이벤트 데이터 전달)
   /// action: 0=DOWN, 1=UP, 2=MOVE, 3=CANCEL
   static void injectMotionEvent(
     int displayId,
@@ -102,14 +102,26 @@ class NativeService {
     double x,
     double y,
     int downTime,
-    int eventTime,
-  ) {
+    int eventTime, {
+    int device = 0,
+    double pressure = 1.0,
+    double size = 1.0,
+    int source = 4098, // SOURCE_TOUCHSCREEN
+    int toolType = 1, // TOOL_TYPE_FINGER
+    int pointerId = 0,
+  }) {
     // Fire-and-forget: 결과 대기 안 함
     _channel.invokeMethod('injectMotionEvent', {
       'displayId': displayId,
       'action': action,
       'x': x,
       'y': y,
+      'device': device,
+      'pressure': pressure,
+      'size': size,
+      'source': source,
+      'toolType': toolType,
+      'pointerId': pointerId,
     });
   }
   
@@ -220,6 +232,19 @@ class NativeService {
       return false;
     }
   }
+  
+  /// 특정 디스플레이의 현재 앱을 백그라운드로 이동 (프로세스 유지)
+  static Future<bool> moveTaskToBack(int displayId) async {
+    try {
+      final result = await _channel.invokeMethod('moveTaskToBack', {
+        'displayId': displayId,
+      });
+      return result == true;
+    } catch (e) {
+      print("NativeService: Error moving task to back: $e");
+      return false;
+    }
+  }
 
   /// 앱을 메인 디스플레이로 이동 (전체화면)
   static Future<bool> moveToMainDisplay(String packageName) async {
@@ -290,6 +315,50 @@ class NativeService {
       // 에러 시 기본적으로 허용 (안전한 기본값)
       print("NativeService: Error checking canGoBack: $e");
       return true;
+    }
+  }
+  
+  /// 디스플레이의 모든 Task 종료 (프리셋 변경 시 정리용)
+  static Future<bool> clearDisplayTasks(int displayId) async {
+    try {
+      print("NativeService: Clearing all tasks on display $displayId");
+      final result = await _channel.invokeMethod('clearDisplayTasks', {
+        'displayId': displayId,
+      });
+      return result == true;
+    } catch (e) {
+      print("NativeService: Error clearing display tasks: $e");
+      return false;
+    }
+  }
+  
+  /// 디스플레이의 현재 보이는 Task만 제거 (새 앱 실행 전에 호출)
+  /// Task Stack에서 이전 앱이 나타나지 않도록 함
+  static Future<bool> removeVisibleTaskOnDisplay(int displayId) async {
+    try {
+      print("NativeService: Removing visible task on display $displayId");
+      final result = await _channel.invokeMethod('removeVisibleTaskOnDisplay', {
+        'displayId': displayId,
+      });
+      return result == true;
+    } catch (e) {
+      print("NativeService: Error removing visible task: $e");
+      return false;
+    }
+  }
+  
+  /// 디스플레이의 현재 앱을 백그라운드로 보내기 (앱 종료 없이)
+  /// 음악/네비 등 백그라운드 재생이 필요한 앱에 사용
+  static Future<bool> sendTaskToBackground(int displayId) async {
+    try {
+      print("NativeService: Sending task to background on display $displayId");
+      final result = await _channel.invokeMethod('sendTaskToBackground', {
+        'displayId': displayId,
+      });
+      return result == true;
+    } catch (e) {
+      print("NativeService: Error sending task to background: $e");
+      return false;
     }
   }
 }

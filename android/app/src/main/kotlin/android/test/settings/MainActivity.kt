@@ -85,6 +85,102 @@ class MainActivity : FlutterActivity() {
         }
     }
     
+    /**
+     * 원본 앱 방식: AndroidTouchProcessor.trackMotionEvents = true 설정
+     * 이렇게 하면 Flutter가 원본 MotionEvent를 저장하고, 나중에 ID로 검색 가능
+     * 
+     * 원본 코드 (o1/b.java):
+     * Field declaredField2 = s3.a.class.getDeclaredField("trackMotionEvents");
+     * declaredField2.setAccessible(true);
+     * declaredField2.set(aVar3, Boolean.TRUE);
+     * 
+     * 추가: MotionEventTracker 인스턴스를 가져와서 PlatformViewTouchHandler에 전달
+     */
+    private fun enableTrackMotionEvents(flutterEngine: FlutterEngine) {
+        try {
+            // FlutterView 가져오기
+            val flutterView = flutterEngine.renderer
+            
+            // io.flutter.embedding.android.AndroidTouchProcessor 클래스
+            val touchProcessorClass = Class.forName("io.flutter.embedding.android.AndroidTouchProcessor")
+            
+            // trackMotionEvents 필드 찾기
+            val trackMotionEventsField = touchProcessorClass.getDeclaredField("trackMotionEvents")
+            trackMotionEventsField.isAccessible = true
+            
+            // motionEventTracker 필드 찾기 (원본 앱 방식)
+            val motionEventTrackerField = touchProcessorClass.getDeclaredField("motionEventTracker")
+            motionEventTrackerField.isAccessible = true
+            
+            // FlutterView에서 AndroidTouchProcessor 인스턴스 가져오기
+            // FlutterView 클래스에서 androidTouchProcessor 필드 찾기
+            val flutterViewClass = Class.forName("io.flutter.embedding.android.FlutterView")
+            val touchProcessorField = flutterViewClass.getDeclaredField("androidTouchProcessor")
+            touchProcessorField.isAccessible = true
+            
+            // 현재 Activity의 FlutterView 찾기 (지연 실행 필요)
+            handler.postDelayed({
+                try {
+                    val decorView = window.decorView
+                    val flutterViewInstance = findFlutterView(decorView)
+                    
+                    if (flutterViewInstance != null) {
+                        val touchProcessor = touchProcessorField.get(flutterViewInstance)
+                        if (touchProcessor != null) {
+                            // trackMotionEvents = true 설정
+                            trackMotionEventsField.set(touchProcessor, true)
+                            Log.i(TAG, "AndroidTouchProcessor.trackMotionEvents = true (원본 앱 방식)")
+                            
+                            // MotionEventTracker 인스턴스 가져오기
+                            val motionEventTracker = motionEventTrackerField.get(touchProcessor)
+                            if (motionEventTracker != null) {
+                                // PlatformViewTouchHandler 초기화
+                                val initialized = PlatformViewTouchHandler.initialize(motionEventTracker)
+                                Log.i(TAG, "PlatformViewTouchHandler initialized: $initialized")
+                            } else {
+                                Log.w(TAG, "MotionEventTracker instance is null")
+                                // MotionEventTracker 없이도 초기화 시도
+                                PlatformViewTouchHandler.initialize(null)
+                            }
+                        } else {
+                            Log.w(TAG, "AndroidTouchProcessor instance is null")
+                        }
+                    } else {
+                        Log.w(TAG, "FlutterView not found in view hierarchy")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to set trackMotionEvents (delayed)", e)
+                }
+            }, 1000) // FlutterView가 생성될 때까지 대기
+            
+            Log.d(TAG, "enableTrackMotionEvents scheduled")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to enable trackMotionEvents", e)
+        }
+    }
+    
+    /**
+     * View 계층에서 FlutterView 찾기
+     */
+    private fun findFlutterView(view: android.view.View): Any? {
+        try {
+            val flutterViewClass = Class.forName("io.flutter.embedding.android.FlutterView")
+            if (flutterViewClass.isInstance(view)) {
+                return view
+            }
+            
+            if (view is android.view.ViewGroup) {
+                for (i in 0 until view.childCount) {
+                    val result = findFlutterView(view.getChildAt(i))
+                    if (result != null) return result
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error finding FlutterView", e)
+        }
+        return null
+    }
+    
     private fun forceLandscapeOrientation() {
         // 여러 방법으로 강제 가로모드 설정
         try {
@@ -209,9 +305,16 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    // PlatformView Factory 참조 (dispose를 위해)
+    private var virtualDisplayViewFactory: VirtualDisplayViewFactory? = null
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         Log.d(TAG, "Configuring Flutter Engine")
+        
+        // 원본 앱 방식: AndroidTouchProcessor.trackMotionEvents = true 설정
+        // 이렇게 하면 원본 MotionEvent가 저장되어 나중에 ID로 검색 가능
+        enableTrackMotionEvents(flutterEngine)
         
         // Initialize LauncherApps
         launcherApps = getSystemService(LAUNCHER_APPS_SERVICE) as LauncherApps
@@ -222,6 +325,14 @@ class MainActivity : FlutterActivity() {
         // TouchInjector 초기화 (시스템 API 터치 주입)
         val touchInjectorAvailable = TouchInjector.initialize()
         Log.i(TAG, "TouchInjector available: $touchInjectorAvailable")
+        
+        // VirtualDisplay PlatformView 등록 (원본 앱 방식 터치 처리)
+        virtualDisplayViewFactory = VirtualDisplayViewFactory(flutterEngine.dartExecutor.binaryMessenger)
+        flutterEngine.platformViewsController.registry.registerViewFactory(
+            VirtualDisplayViewFactory.VIEW_TYPE,
+            virtualDisplayViewFactory!!
+        )
+        Log.i(TAG, "VirtualDisplayViewFactory registered: ${VirtualDisplayViewFactory.VIEW_TYPE}")
         
         // 시스템 API 사용 가능 여부 확인 및 TaskStackListener 등록
         Thread {
@@ -238,10 +349,14 @@ class MainActivity : FlutterActivity() {
                 useSystemApi = false
             }
             
-            // Root 권한도 확인 (fallback용)
+            // Root 권한도 확인 (fallback용) + 지속 세션 시작
             if (!useSystemApi || !touchInjectorAvailable) {
                 val hasRoot = RootUtils.requestRoot()
                 Log.i(TAG, "Root permission available: $hasRoot")
+                if (hasRoot) {
+                    // 지속적인 su 세션 시작 (프리셋 전환 최적화)
+                    RootUtils.initPersistentSession()
+                }
             }
         }.start()
         
@@ -255,7 +370,7 @@ class MainActivity : FlutterActivity() {
             // Flutter에 알림 (필요시)
         }
         
-        virtualDisplayManager = VirtualDisplayManager(context)
+        virtualDisplayManager = VirtualDisplayManager.getInstance(context)
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             Log.d(TAG, "MethodChannel received: ${call.method}")
@@ -367,10 +482,19 @@ class MainActivity : FlutterActivity() {
                     val downTime = (call.argument<Number>("downTime")?.toLong()) ?: SystemClock.uptimeMillis()
                     val eventTime = (call.argument<Number>("eventTime")?.toLong()) ?: SystemClock.uptimeMillis()
                     
+                    // 원본 앱 방식: PointerEvent의 모든 속성 전달
+                    val device = call.argument<Int>("device") ?: 0
+                    val pressure = call.argument<Double>("pressure")?.toFloat() ?: 1.0f
+                    val size = call.argument<Double>("size")?.toFloat() ?: 1.0f
+                    val source = call.argument<Int>("source") ?: android.view.InputDevice.SOURCE_TOUCHSCREEN
+                    val toolType = call.argument<Int>("toolType") ?: android.view.MotionEvent.TOOL_TYPE_FINGER
+                    val pointerId = call.argument<Int>("pointerId") ?: 0
+                    
                     // 실시간 터치 이벤트 - 동기 처리 (Thread 없이 즉시)
                     if (TouchInjector.isAvailable()) {
                         val success = TouchInjector.injectMotionEventFromFlutter(
-                            displayId, action, x.toFloat(), y.toFloat(), downTime, eventTime
+                            displayId, action, x.toFloat(), y.toFloat(), downTime, eventTime,
+                            device, pressure, size, source, toolType, pointerId
                         )
                         result.success(success)
                     } else {
@@ -468,6 +592,17 @@ class MainActivity : FlutterActivity() {
                         result.error("INVALID_ARGS", "Package name required", null)
                     }
                 }
+                "moveTaskToBack" -> {
+                    val displayId = call.argument<Int>("displayId")
+                    if (displayId != null) {
+                        Thread {
+                            val success = taskManager.moveTaskToBack(displayId)
+                            runOnUiThread { result.success(success) }
+                        }.start()
+                    } else {
+                        result.error("INVALID_ARGS", "displayId required", null)
+                    }
+                }
                 // ============================================
                 // 전체화면 앱 실행 (메인 디스플레이에서 전체화면 모드)
                 // ============================================
@@ -551,6 +686,39 @@ class MainActivity : FlutterActivity() {
                         }
                     } else {
                         result.success(true)
+                    }
+                }
+                "clearDisplayTasks" -> {
+                    val displayId = call.argument<Int>("displayId")
+                    if (displayId != null) {
+                        Thread {
+                            val success = taskManager.clearDisplayTasks(displayId)
+                            runOnUiThread { result.success(success) }
+                        }.start()
+                    } else {
+                        result.error("INVALID_ARGS", "displayId required", null)
+                    }
+                }
+                "removeVisibleTaskOnDisplay" -> {
+                    val displayId = call.argument<Int>("displayId")
+                    if (displayId != null) {
+                        Thread {
+                            val success = taskManager.removeVisibleTaskOnDisplay(displayId)
+                            runOnUiThread { result.success(success) }
+                        }.start()
+                    } else {
+                        result.error("INVALID_ARGS", "displayId required", null)
+                    }
+                }
+                "sendTaskToBackground" -> {
+                    val displayId = call.argument<Int>("displayId")
+                    if (displayId != null) {
+                        Thread {
+                            val success = taskManager.sendTaskToBackground(displayId)
+                            runOnUiThread { result.success(success) }
+                        }.start()
+                    } else {
+                        result.error("INVALID_ARGS", "displayId required", null)
                     }
                 }
                 else -> {
@@ -657,33 +825,26 @@ class MainActivity : FlutterActivity() {
         
         val componentString = componentName.flattenToShortString()
         
-        // Strategy 1: ROOT Shell (Most Reliable)
+        // Strategy 1: ROOT Shell (Most Reliable) - 비동기 실행으로 최적화
         try {
-            Log.d(TAG, "Strategy 1: Attempting ROOT shell launch")
-            Log.d(TAG, "Root command target: $componentString")
+            Log.d(TAG, "Strategy 1: Attempting ROOT shell launch (async)")
             
             // Escape special characters for shell
             val escapedComponent = componentString.replace("$", "\\$")
             
             // Command: am start -n <Component> --display <DisplayId> --windowingMode 1
-            val cmd = "am start -n \"$escapedComponent\" --display $displayId --windowingMode 1"
-            Log.i(TAG, "Executing ROOT command: $cmd")
+            // 0x800080 = FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS (0x800000) | FLAG_ACTIVITY_NO_HISTORY (0x80)
+            // 최근 앱 목록에 나타나지 않도록 설정
+            val cmd = "am start -n \"$escapedComponent\" --display $displayId --windowingMode 1 -f 0x800080"
+            Log.i(TAG, "Executing ROOT command (async): $cmd")
             
-            val result = RootUtils.executeCommand(cmd)
+            // 비동기 실행 (결과 대기 안 함 - 프리셋 전환 최적화)
+            RootUtils.executeCommandAsync(cmd)
             
-            Log.d(TAG, "Root command exit code: ${if(result.success) "0 (success)" else "non-zero (failed)"}")
-            Log.d(TAG, "Root command output: ${result.output}")
-            if (result.error.isNotEmpty()) {
-                Log.w(TAG, "Root command error: ${result.error}")
-            }
+            Log.i(TAG, "✓ ROOT command queued for async execution")
+            Log.i(TAG, "========== launchAppInDisplay END (ASYNC ROOT) ==========")
+            return
             
-            if (result.success) {
-                Log.i(TAG, "✓ Launched via ROOT shell successfully")
-                Log.i(TAG, "========== launchAppInDisplay END (SUCCESS via ROOT) ==========")
-                return
-            } else {
-                Log.w(TAG, "✗ ROOT launch failed, trying PendingIntent fallback")
-            }
         } catch (e: Exception) {
             Log.e(TAG, "✗ ROOT shell launch failed", e)
         }
@@ -699,6 +860,9 @@ class MainActivity : FlutterActivity() {
                 addFlags(Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
                 addFlags(Intent.FLAG_ACTIVITY_LAUNCH_ADJACENT)
+                // 최근 앱 목록에서 제외 (VirtualDisplay용)
+                addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS)
+                addFlags(Intent.FLAG_ACTIVITY_NO_HISTORY)
             }
             
             val options = ActivityOptions.makeBasic()

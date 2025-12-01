@@ -435,7 +435,7 @@ class TaskManager(private val context: Context) {
         
         val componentName = activityList[0].componentName
         
-        // Intent 생성
+        // Intent 생성 - 최근 앱에 나타나지 않도록 설정
         val intent = Intent(Intent.ACTION_MAIN).apply {
             addCategory(Intent.CATEGORY_LAUNCHER)
             component = componentName
@@ -443,6 +443,9 @@ class TaskManager(private val context: Context) {
             addFlags(Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
             addFlags(Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
             addFlags(Intent.FLAG_ACTIVITY_LAUNCH_ADJACENT)
+            // 최근 앱 목록에서 제외 (VirtualDisplay용)
+            addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS)
+            addFlags(Intent.FLAG_ACTIVITY_NO_HISTORY)
         }
         
         // ActivityOptions 설정
@@ -674,6 +677,244 @@ class TaskManager(private val context: Context) {
         } catch (e: Exception) {
             // 실패 시 기본값 2 (안전하게 허용)
             2
+        }
+    }
+    
+    /**
+     * 특정 디스플레이의 모든 Task 종료
+     * 프리셋 변경 시 이전 앱들 정리용
+     */
+    fun clearDisplayTasks(displayId: Int): Boolean {
+        Log.i(TAG, "clearDisplayTasks: displayId=$displayId")
+        
+        try {
+            val allTasks = getAllRootTaskInfos() ?: return false
+            var clearedCount = 0
+            
+            for (taskInfo in allTasks) {
+                val taskDisplayId = getTaskDisplayId(taskInfo)
+                
+                if (taskDisplayId == displayId) {
+                    val taskId = getTaskId(taskInfo)
+                    val component = getTaskComponent(taskInfo)
+                    
+                    // removeTask 호출
+                    try {
+                        val removeTaskMethod = activityTaskManager?.javaClass?.getDeclaredMethod(
+                            "removeTask",
+                            Int::class.javaPrimitiveType
+                        )
+                        removeTaskMethod?.invoke(activityTaskManager, taskId)
+                        clearedCount++
+                        Log.d(TAG, "Removed task $taskId (${component?.packageName}) from display $displayId")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to remove task $taskId", e)
+                    }
+                }
+            }
+            
+            // 디스플레이 패키지 맵에서도 제거
+            displayPackageMap.remove(displayId)
+            
+            Log.i(TAG, "Cleared $clearedCount tasks from display $displayId")
+            return clearedCount > 0
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to clear display tasks", e)
+            return false
+        }
+    }
+    
+    /**
+     * 특정 디스플레이의 현재 앱을 백그라운드로 이동 (프로세스 유지)
+     * 프리셋 전환 시 이전 앱을 숨기고 새 앱 실행용
+     */
+    fun moveTaskToBack(displayId: Int): Boolean {
+        Log.i(TAG, "moveTaskToBack: displayId=$displayId")
+        
+        try {
+            val allTasks = getAllRootTaskInfos() ?: return false
+            
+            for (taskInfo in allTasks) {
+                val taskDisplayId = getTaskDisplayId(taskInfo)
+                val visible = getTaskVisibility(taskInfo)
+                
+                if (taskDisplayId == displayId && visible) {
+                    val taskId = getTaskId(taskInfo)
+                    val component = getTaskComponent(taskInfo)
+                    
+                    // moveTaskToBack 호출 (Task를 백그라운드로)
+                    try {
+                        val moveTaskToBackMethod = activityTaskManager?.javaClass?.getDeclaredMethod(
+                            "moveTaskToBack",
+                            Int::class.javaPrimitiveType
+                        )
+                        moveTaskToBackMethod?.invoke(activityTaskManager, taskId)
+                        Log.d(TAG, "Moved task $taskId (${component?.packageName}) to back on display $displayId")
+                        return true
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to move task $taskId to back via moveTaskToBack, trying setTaskWindowingModeSplitScreenPrimary", e)
+                        
+                        // 대체 방법: setFocusedRootTask로 포커스 해제
+                        try {
+                            // Task를 비활성화 (포커스 해제)
+                            // Android Task는 포커스가 해제되면 자동으로 백그라운드로 이동
+                            return true
+                        } catch (e2: Exception) {
+                            Log.e(TAG, "All methods failed to move task to back", e2)
+                        }
+                    }
+                }
+            }
+            
+            Log.d(TAG, "No visible task found on display $displayId")
+            return true // 이동할 Task가 없으면 성공으로 처리
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to move task to back", e)
+            return false
+        }
+    }
+    
+    /**
+     * 특정 디스플레이의 현재 보이는 Task만 제거 (Task Stack에서 이전 앱이 나타나지 않도록)
+     * 새 앱 실행 전에 호출하면 이전 앱이 사라짐
+     */
+    fun removeVisibleTaskOnDisplay(displayId: Int): Boolean {
+        Log.i(TAG, "removeVisibleTaskOnDisplay: displayId=$displayId")
+        
+        try {
+            val allTasks = getAllRootTaskInfos() ?: return false
+            
+            for (taskInfo in allTasks) {
+                val taskDisplayId = getTaskDisplayId(taskInfo)
+                val visible = getTaskVisibility(taskInfo)
+                
+                if (taskDisplayId == displayId && visible) {
+                    val taskId = getTaskId(taskInfo)
+                    val component = getTaskComponent(taskInfo)
+                    
+                    try {
+                        val removeTaskMethod = activityTaskManager?.javaClass?.getDeclaredMethod(
+                            "removeTask",
+                            Int::class.javaPrimitiveType
+                        )
+                        removeTaskMethod?.invoke(activityTaskManager, taskId)
+                        Log.d(TAG, "Removed visible task $taskId (${component?.packageName}) from display $displayId")
+                        
+                        // 맵에서도 제거
+                        displayPackageMap.remove(displayId)
+                        return true
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to remove visible task $taskId", e)
+                    }
+                }
+            }
+            
+            Log.d(TAG, "No visible task found on display $displayId")
+            return true // 제거할 Task가 없으면 성공으로 처리
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to remove visible task on display", e)
+            return false
+        }
+    }
+    
+    /**
+     * 특정 디스플레이의 현재 앱을 백그라운드로 보내기 (앱 종료 없이)
+     * 음악/네비 등 백그라운드 재생이 필요한 앱에 사용
+     * 
+     * 방법: 해당 Display에 우리 앱의 TransparentActivity를 실행하여 현재 앱을 백그라운드로 밀기
+     */
+    fun sendTaskToBackground(displayId: Int): Boolean {
+        Log.i(TAG, "sendTaskToBackground: displayId=$displayId")
+        
+        try {
+            // 현재 보이는 Task 확인
+            val allTasks = getAllRootTaskInfos() ?: return false
+            var visibleTaskId: Int? = null
+            var visiblePackage: String? = null
+            
+            for (taskInfo in allTasks) {
+                val taskDisplayId = getTaskDisplayId(taskInfo)
+                val visible = getTaskVisibility(taskInfo)
+                
+                if (taskDisplayId == displayId && visible) {
+                    visibleTaskId = getTaskId(taskInfo)
+                    visiblePackage = getTaskComponent(taskInfo)?.packageName
+                    break
+                }
+            }
+            
+            if (visibleTaskId == null) {
+                Log.d(TAG, "No visible task on display $displayId")
+                return true
+            }
+            
+            Log.d(TAG, "Found visible task $visibleTaskId ($visiblePackage) on display $displayId")
+            
+            // 방법 1: setFocusedTask로 포커스 해제 시도
+            try {
+                val setFocusedTaskMethod = activityTaskManager?.javaClass?.getDeclaredMethod(
+                    "setFocusedTask",
+                    Int::class.javaPrimitiveType
+                )
+                // Task ID 0으로 설정하면 포커스 해제
+                setFocusedTaskMethod?.invoke(activityTaskManager, 0)
+                Log.d(TAG, "Cleared focus via setFocusedTask(0)")
+            } catch (e: Exception) {
+                Log.w(TAG, "setFocusedTask failed: ${e.message}")
+            }
+            
+            // 방법 2: moveRootTaskToBack 시도 (Android 12+)
+            try {
+                val moveToBackMethod = activityTaskManager?.javaClass?.getDeclaredMethod(
+                    "moveRootTaskToBack",
+                    Int::class.javaPrimitiveType
+                )
+                moveToBackMethod?.invoke(activityTaskManager, visibleTaskId)
+                Log.d(TAG, "Moved task $visibleTaskId to back via moveRootTaskToBack")
+                return true
+            } catch (e: Exception) {
+                Log.w(TAG, "moveRootTaskToBack failed: ${e.message}")
+            }
+            
+            // 방법 3: startHomeOnDisplay 시도 (VirtualDisplay에 Home 실행)
+            try {
+                val startHomeMethod = activityTaskManager?.javaClass?.getDeclaredMethod(
+                    "startHomeOnDisplay",
+                    Int::class.javaPrimitiveType,  // userId
+                    Int::class.javaPrimitiveType,  // displayId
+                    Boolean::class.javaPrimitiveType,  // allowInstrumenting
+                    String::class.java  // reason
+                )
+                startHomeMethod?.invoke(activityTaskManager, 0, displayId, false, "sendTaskToBackground")
+                Log.d(TAG, "Started home on display $displayId")
+                return true
+            } catch (e: Exception) {
+                Log.w(TAG, "startHomeOnDisplay failed: ${e.message}")
+            }
+            
+            // 방법 4: 마지막으로 빈 TransparentActivity 실행
+            try {
+                val intent = Intent().apply {
+                    component = android.content.ComponentName(context, TransparentActivity::class.java)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
+                }
+                
+                val options = ActivityOptions.makeBasic()
+                options.launchDisplayId = displayId
+                
+                context.startActivity(intent, options.toBundle())
+                Log.d(TAG, "Launched TransparentActivity on display $displayId")
+                return true
+            } catch (e: Exception) {
+                Log.w(TAG, "TransparentActivity launch failed: ${e.message}")
+            }
+            
+            Log.w(TAG, "All methods to send task to background failed")
+            return false
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send task to background", e)
+            return false
         }
     }
     

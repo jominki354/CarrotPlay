@@ -370,12 +370,12 @@ class _AppSelectorSheet extends StatelessWidget {
             child: apps.isEmpty
                 ? const Center(child: CircularProgressIndicator())
                 : GridView.builder(
-                    padding: const EdgeInsets.all(16),
+                    padding: const EdgeInsets.all(12),
                     gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                       crossAxisCount: isLandscape ? 8 : 4,
-                      mainAxisSpacing: 16,
-                      crossAxisSpacing: 16,
-                      childAspectRatio: 0.8,
+                      mainAxisSpacing: 12,
+                      crossAxisSpacing: 12,
+                      childAspectRatio: 0.75, // 아이콘 + 텍스트 높이 고려
                     ),
                     itemCount: apps.length,
                     itemBuilder: (context, index) {
@@ -383,19 +383,22 @@ class _AppSelectorSheet extends StatelessWidget {
                       return GestureDetector(
                         onTap: () => onSelect(app),
                         child: Column(
+                          mainAxisAlignment: MainAxisAlignment.start,
                           children: [
                             AppIconWrapper(
                               iconData: app.icon,
-                              size: 56,
+                              size: 44,
                               radius: AppDimens.radiusMedium,
                             ),
-                            const SizedBox(height: 8),
-                            Text(
-                              app.appName,
-                              style: const TextStyle(fontSize: 12, color: Colors.white70),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              textAlign: TextAlign.center,
+                            const SizedBox(height: 4),
+                            Expanded(
+                              child: Text(
+                                app.appName,
+                                style: const TextStyle(fontSize: 10, color: Colors.white70),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                textAlign: TextAlign.center,
+                              ),
                             ),
                           ],
                         ),

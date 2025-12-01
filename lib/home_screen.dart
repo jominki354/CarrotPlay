@@ -11,6 +11,7 @@ import 'native_service.dart';
 import 'theme/app_colors.dart';
 import 'theme/app_dimens.dart';
 import 'widgets/animations/bouncy_button.dart';
+import 'performance_monitor.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -50,8 +51,12 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   
   // 디버그 오버레이
   bool _showDebugOverlay = true; // 지금은 항상 보이게
-  late Timer _debugTimer;
   Map<String, dynamic> _debugInfo = {};
+  
+  // 성능 모니터
+  final PerformanceMonitor _perfMonitor = PerformanceMonitor();
+  StreamSubscription<PerformanceData>? _perfSubscription;
+  PerformanceData? _perfData;
 
   @override
   void initState() {
@@ -86,8 +91,18 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     // 앱 목록 새로고침 (앱 캐시 리셋 후 다시 로드)
     _refreshAppCache();
     
-    // 디버그 오버레이 타이머 (1초마다 업데이트)
-    _debugTimer = Timer.periodic(const Duration(seconds: 1), (_) => _updateDebugInfo());
+    // 디버그 정보 초기 로드 (타이머 제거 - 수동 새로고침만)
+    WidgetsBinding.instance.addPostFrameCallback((_) => _updateDebugInfo());
+    
+    // 성능 모니터 시작 (setState 최소화로 프레임 개선)
+    _perfMonitor.start();
+    _perfSubscription = _perfMonitor.stream.listen((data) {
+      if (mounted && _showDebugOverlay) {
+        _perfData = data;
+        // 디버그 정보 갱신 (PIP 앱 정보 포함)
+        _updateDebugInfoLightweight();
+      }
+    });
   }
   
   Future<void> _refreshAppCache() async {
@@ -98,11 +113,12 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   @override
   void dispose() {
     _clockTimer.cancel();
-    _debugTimer.cancel();
     _connectivity.dispose();
     _presetService.removeListener(_onPresetChanged);
     _drawerAnimController.dispose();
     _pipDrawerAnimController.dispose();
+    _perfSubscription?.cancel();
+    _perfMonitor.stop();
     super.dispose();
   }
 
@@ -164,6 +180,36 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         'fullscreen': _showFullscreenApp ? 'Yes' : 'No',
       };
     });
+  }
+  
+  /// 경량 디버그 정보 갱신 (PIP 앱 정보만 빠르게 갱신 - 성능 최적화)
+  void _updateDebugInfoLightweight() {
+    if (!_showDebugOverlay || !mounted) return;
+    
+    final pip1State = _pip1Key.currentState;
+    final pip2State = _pip2Key.currentState;
+    
+    // PIP 앱 정보만 갱신 (나머지는 유지)
+    final pip1App = pip1State?.currentPackage?.split('.').last ?? '-';
+    final pip2App = pip2State?.currentPackage?.split('.').last ?? '-';
+    final pip1Vd = pip1State?.virtualDisplayId?.toString() ?? '-';
+    final pip2Vd = pip2State?.virtualDisplayId?.toString() ?? '-';
+    
+    // 변경된 경우에만 setState
+    if (_debugInfo['pip1_app'] != pip1App ||
+        _debugInfo['pip2_app'] != pip2App ||
+        _debugInfo['pip1_vd'] != pip1Vd ||
+        _debugInfo['pip2_vd'] != pip2Vd) {
+      setState(() {
+        _debugInfo['pip1_app'] = pip1App;
+        _debugInfo['pip2_app'] = pip2App;
+        _debugInfo['pip1_vd'] = pip1Vd;
+        _debugInfo['pip2_vd'] = pip2Vd;
+      });
+    } else {
+      // PIP 정보 변경 없으면 FPS만 갱신 (성능 최적화)
+      setState(() {});
+    }
   }
   
   void _toggleDebugOverlay() {
@@ -269,8 +315,13 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       if (_showAppDrawer) {
         _closeAppDrawer();
       }
+      
+      // 현재 비율 저장 (selectPreset 전에!)
+      final previousRatio = _presetService.currentPreset.leftRatio;
+      
+      // 이미 선택된 프리셋이어도 앱 실행 (재실행)
       _presetService.selectPreset(index);
-      _launchPresetApps(index);
+      _launchPresetApps(index, previousRatio: previousRatio);
     }
   }
 
@@ -291,28 +342,64 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     );
   }
 
-  void _launchPresetApps(int index) {
+  void _launchPresetApps(int index, {double? previousRatio}) {
     final preset = _presetService.presets[index];
     
     // PIP 내 앱서랍 닫기
     _pip1Key.currentState?.closeInlineDrawer();
     _pip2Key.currentState?.closeInlineDrawer();
     
-    // PIP 1에 앱 실행
+    // 1. 프리셋의 비율로 VirtualDisplay 크기 재조정
+    // 이전 비율과 다른 경우에만 실행 (중복 호출 방지)
+    final prevRatio = previousRatio ?? preset.leftRatio;
+    final needsResize = (prevRatio - preset.leftRatio).abs() > 0.01;
+    
+    // 성능 최적화: 비율 변경과 앱 실행을 병렬로 처리
+    // UI는 바로 업데이트하고 백그라운드에서 VirtualDisplay resize
+    if (needsResize) {
+      // VirtualDisplay resize는 완전 비동기로 (결과 대기 안 함)
+      _resizePipDisplaysAsync(preset.leftRatio);
+    }
+    
+    // 2. PIP 앱 실행도 병렬로 (각각 비동기)
     if (preset.pip1.isNotEmpty) {
-      _pip1Key.currentState?.launchAppWithConfig(
+      // 결과 대기 안 함 - fire and forget
+      _pip1Key.currentState?.launchAppWithConfigFast(
         preset.pip1.packageName!,
         scale: preset.pip1.scale,
       );
     }
     
-    // PIP 2에 앱 실행
     if (preset.pip2.isNotEmpty) {
-      _pip2Key.currentState?.launchAppWithConfig(
+      // 결과 대기 안 함 - fire and forget
+      _pip2Key.currentState?.launchAppWithConfigFast(
         preset.pip2.packageName!,
         scale: preset.pip2.scale,
       );
     }
+  }
+  
+  /// VirtualDisplay 크기 재조정 (완전 비동기 - 결과 대기 안 함)
+  void _resizePipDisplaysAsync(double leftRatio) {
+    final mediaQuery = MediaQuery.of(context);
+    final screenSize = mediaQuery.size;
+    final devicePixelRatio = mediaQuery.devicePixelRatio;
+    final contentWidth = screenSize.width - AppDimens.dockWidth;
+    
+    // 병렬로 실행 (결과 대기 안 함)
+    _pip1Key.currentState?.resizeToFitAsync(
+      leftRatio,
+      contentWidth,
+      screenSize.height,
+      devicePixelRatio,
+    );
+    
+    _pip2Key.currentState?.resizeToFitAsync(
+      1.0 - leftRatio,
+      contentWidth,
+      screenSize.height,
+      devicePixelRatio,
+    );
   }
 
   @override
@@ -423,15 +510,19 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     );
   }
   
-  /// 디버그 오버레이 위젯
+  /// 디버그 오버레이 위젯 (FPS/성능 지표 포함)
+  /// 그룹별로 구분: [성능] [PIP1 상세] [PIP2 상세] [레이아웃]
   Widget _buildDebugOverlay() {
-    if (_debugInfo.isEmpty) return const SizedBox.shrink();
+    final perf = _perfData;
+    final pip1 = _pip1Key.currentState;
+    final pip2 = _pip2Key.currentState;
+    final fs = _fullscreenPipKey.currentState;
     
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.6),
-        border: Border(bottom: BorderSide(color: Colors.white.withOpacity(0.1))),
+        color: Colors.black.withOpacity(0.85),
+        border: Border(bottom: BorderSide(color: AppColors.carrotOrange.withOpacity(0.5), width: 1)),
       ),
       child: DefaultTextStyle(
         style: const TextStyle(
@@ -440,36 +531,105 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
           color: Colors.white,
           height: 1.3,
         ),
-        child: Column(
+        child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
           children: [
-            // 1줄: 화면 정보
-            Row(
+            // ═══════════════════════════════════════
+            // 그룹 1: 성능 (Performance)
+            // ═══════════════════════════════════════
+            _debugGroup(
+              title: '⚡ Performance',
+              color: Colors.amber,
               children: [
-                _debugLabel('Screen', _debugInfo['screen']),
-                _debugLabel('Physical', _debugInfo['physical']),
-                _debugLabel('DPR', _debugInfo['dpr']),
-                _debugLabel('DPI', '${_debugInfo['dpi']}'),
-                _debugLabel('Orient', _debugInfo['orientation']),
+                _fpsLabel('FPS', perf?.fps ?? 0),
+                _debugLabel('Frame', '${perf?.avgFrameTimeMs.toStringAsFixed(1) ?? '-'}ms'),
+                _debugLabel('Drop', '${perf?.droppedFrames ?? 0}'),
               ],
             ),
-            // 2줄: VirtualDisplay 정보
-            Row(
+            const SizedBox(width: 8),
+            
+            // ═══════════════════════════════════════
+            // 그룹 2: PIP 1 (왼쪽 화면)
+            // ═══════════════════════════════════════
+            _debugGroup(
+              title: '🔵 PIP 1 (Left)',
+              color: Colors.blue,
               children: [
-                _debugLabel('PIP1', 'VD${_debugInfo['pip1_vd']} [${_debugInfo['pip1_app']}]'),
-                _debugLabel('PIP2', 'VD${_debugInfo['pip2_vd']} [${_debugInfo['pip2_app']}]'),
-                _debugLabel('FS', 'VD${_debugInfo['fs_vd']} [${_debugInfo['fs_app']}]'),
+                _debugLabel('Display', 'VD${_debugInfo['pip1_vd'] ?? '-'}'),
+                _debugLabel('App', _debugInfo['pip1_app'] ?? '-'),
+                _debugLabel('Touch', '${pip1?.touchMoveCount ?? 0}', valueColor: Colors.greenAccent),
               ],
             ),
-            // 3줄: 레이아웃/상태 정보
-            Row(
+            const SizedBox(width: 8),
+            
+            // ═══════════════════════════════════════
+            // 그룹 3: PIP 2 (오른쪽 화면)
+            // ═══════════════════════════════════════
+            _debugGroup(
+              title: '🟢 PIP 2 (Right)',
+              color: Colors.green,
               children: [
-                _debugLabel('Ratio', _debugInfo['pip_ratio']),
-                _debugLabel('Dock', _debugInfo['dock']),
-                _debugLabel('Content', _debugInfo['content']),
-                _debugLabel('Drawer', _debugInfo['drawer']),
-                _debugLabel('Fullscreen', _debugInfo['fullscreen']),
+                _debugLabel('Display', 'VD${_debugInfo['pip2_vd'] ?? '-'}'),
+                _debugLabel('App', _debugInfo['pip2_app'] ?? '-'),
+                _debugLabel('Touch', '${pip2?.touchMoveCount ?? 0}', valueColor: Colors.greenAccent),
+              ],
+            ),
+            const SizedBox(width: 8),
+            
+            // ═══════════════════════════════════════
+            // 그룹 4: 전체화면 (Fullscreen)
+            // ═══════════════════════════════════════
+            if (_showFullscreenApp || _debugInfo['fs_app'] != null && _debugInfo['fs_app'] != '-')
+              Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: _debugGroup(
+                  title: '🟣 Fullscreen',
+                  color: Colors.purple,
+                  children: [
+                    _debugLabel('Display', 'VD${_debugInfo['fs_vd'] ?? '-'}'),
+                    _debugLabel('App', _debugInfo['fs_app'] ?? '-'),
+                  ],
+                ),
+              ),
+            
+            // ═══════════════════════════════════════
+            // 그룹 5: 레이아웃 정보
+            // ═══════════════════════════════════════
+            _debugGroup(
+              title: '📐 Layout',
+              color: Colors.cyan,
+              children: [
+                _debugLabel('Screen', _debugInfo['screen'] ?? '-'),
+                _debugLabel('Physical', _debugInfo['physical'] ?? '-'),
+                _debugLabel('Ratio', _debugInfo['pip_ratio'] ?? '-'),
+              ],
+            ),
+            const SizedBox(width: 8),
+            
+            // ═══════════════════════════════════════
+            // 그룹 6: 시스템 정보
+            // ═══════════════════════════════════════
+            _debugGroup(
+              title: '⚙️ System',
+              color: Colors.grey,
+              children: [
+                _debugLabel('DPR', _debugInfo['dpr'] ?? '-'),
+                _debugLabel('DPI', '${_debugInfo['dpi'] ?? '-'}'),
+                _debugLabel('Dock', _debugInfo['dock'] ?? '-'),
+              ],
+            ),
+            const SizedBox(width: 8),
+            
+            // ═══════════════════════════════════════
+            // 그룹 7: 상태 정보
+            // ═══════════════════════════════════════
+            _debugGroup(
+              title: '📋 State',
+              color: Colors.orange,
+              children: [
+                _debugLabel('Drawer', _debugInfo['drawer'] ?? '-'),
+                _debugLabel('FS', _debugInfo['fullscreen'] ?? '-'),
+                _debugLabel('Orient', _debugInfo['orientation'] ?? '-'),
               ],
             ),
           ],
@@ -478,70 +638,150 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     );
   }
   
-  Widget _debugLabel(String label, String? value) {
-    return Padding(
-      padding: const EdgeInsets.only(right: 12),
-      child: RichText(
-        text: TextSpan(
-          style: const TextStyle(
+  /// 디버그 그룹 위젯 (제목 + 내용)
+  Widget _debugGroup({
+    required String title,
+    required Color color,
+    required List<Widget> children,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.15),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: color.withOpacity(0.3), width: 1),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // 그룹 제목
+          Text(
+            title,
+            style: TextStyle(
+              fontSize: 8,
+              fontWeight: FontWeight.bold,
+              color: color,
+            ),
+          ),
+          const SizedBox(height: 2),
+          // 그룹 내용
+          ...children,
+        ],
+      ),
+    );
+  }
+  
+  /// FPS 라벨 (색상으로 상태 표시)
+  Widget _fpsLabel(String label, double fps) {
+    Color fpsColor;
+    if (fps >= 55) {
+      fpsColor = const Color(0xFF4CAF50); // 녹색 (좋음)
+    } else if (fps >= 40) {
+      fpsColor = const Color(0xFFFF9800); // 주황 (보통)
+    } else {
+      fpsColor = const Color(0xFFF44336); // 빨강 (나쁨)
+    }
+    
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          '$label:',
+          style: TextStyle(
             fontSize: 9,
             fontFamily: 'monospace',
-            color: Colors.white70,
+            color: AppColors.carrotOrange.withOpacity(0.9),
+            fontWeight: FontWeight.bold,
           ),
-          children: [
-            TextSpan(
-              text: '$label:',
-              style: TextStyle(color: AppColors.carrotOrange.withOpacity(0.8)),
-            ),
-            TextSpan(
-              text: ' ${value ?? '-'}',
-              style: const TextStyle(color: Colors.white),
-            ),
-          ],
         ),
+        Text(
+          ' ${fps.toStringAsFixed(0)}',
+          style: TextStyle(
+            fontSize: 11,
+            fontFamily: 'monospace',
+            color: fpsColor,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ],
+    );
+  }
+  
+  Widget _debugLabel(String label, String? value, {Color? valueColor}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 1),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            '$label:',
+            style: TextStyle(
+              fontSize: 8,
+              fontFamily: 'monospace',
+              color: Colors.white54,
+            ),
+          ),
+          Text(
+            ' ${value ?? '-'}',
+            style: TextStyle(
+              fontSize: 9,
+              fontFamily: 'monospace',
+              color: valueColor ?? Colors.white,
+              fontWeight: valueColor != null ? FontWeight.bold : FontWeight.normal,
+            ),
+          ),
+        ],
       ),
     );
   }
   
   /// 분할 PIP 영역 (2개 PIP) - 현재 프리셋 비율 적용 + 드래그 가능한 구분선 + 하단 제스처 바
+  /// 비율 전환 시 부드러운 애니메이션 적용
   Widget _buildSplitPipArea() {
     final preset = _presetService.currentPreset;
-    final leftFlex = (preset.leftRatio * 100).round();
-    final rightFlex = (preset.rightRatio * 100).round();
     
     return Container(
       color: AppColors.glassGrey,
       child: LayoutBuilder(
         builder: (context, constraints) {
-          // PIP 제스처바 위치 계산 (마진 4px 고려)
-          final leftWidth = constraints.maxWidth * preset.leftRatio - 4;
-          final rightWidth = constraints.maxWidth * preset.rightRatio - 4;
+          // PIP 너비 계산 (애니메이션용)
+          final leftWidth = constraints.maxWidth * preset.leftRatio;
+          final rightWidth = constraints.maxWidth * preset.rightRatio;
           
           return Stack(
             children: [
-              // PIP 영역들 (하단 제스처 바 영역 확보, 좌우 여백 동일하게)
+              // PIP 영역들 (하단 제스처 바 영역 확보)
               Padding(
                 padding: const EdgeInsets.only(bottom: 20), // 하단 제스처바 영역
                 child: Row(
                   children: [
-                    // PIP Area 1 (왼쪽)
-                    Expanded(
-                      flex: leftFlex,
-                      child: PipView(
-                        key: _pip1Key,
-                        displayId: 1,
-                        label: "",
+                    // PIP Area 1 (왼쪽) - AnimatedContainer로 부드러운 크기 전환
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 150),
+                      curve: Curves.easeOutCubic,
+                      width: leftWidth - 4, // 구분선 여백
+                      child: RepaintBoundary(
+                        child: PipView(
+                          key: _pip1Key,
+                          displayId: 1,
+                          label: "",
+                        ),
                       ),
                     ),
                     // 구분선 공간 (제스처바 영역)
                     const SizedBox(width: 8),
-                    // PIP Area 2 (오른쪽)
-                    Expanded(
-                      flex: rightFlex,
-                      child: PipView(
-                        key: _pip2Key,
-                        displayId: 2,
-                        label: "",
+                    // PIP Area 2 (오른쪽) - AnimatedContainer로 부드러운 크기 전환
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 150),
+                      curve: Curves.easeOutCubic,
+                      width: rightWidth - 4, // 구분선 여백
+                      child: RepaintBoundary(
+                        child: PipView(
+                          key: _pip2Key,
+                          displayId: 2,
+                          label: "",
+                        ),
                       ),
                     ),
                   ],
@@ -549,9 +789,11 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
               ),
               
               // PIP 1 하단 제스처 바
-              Positioned(
+              AnimatedPositioned(
+                duration: const Duration(milliseconds: 150),
+                curve: Curves.easeOutCubic,
                 left: 4, // PIP 마진과 동일
-                width: leftWidth - 4, // 마진 보정
+                width: leftWidth - 12, // 마진 보정
                 bottom: 0,
                 height: 20,
                 child: _PipGestureBar(
@@ -561,9 +803,11 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
               ),
               
               // PIP 2 하단 제스처 바
-              Positioned(
+              AnimatedPositioned(
+                duration: const Duration(milliseconds: 150),
+                curve: Curves.easeOutCubic,
                 right: 4, // PIP 마진과 동일
-                width: rightWidth - 4, // 마진 보정
+                width: rightWidth - 12, // 마진 보정
                 bottom: 0,
                 height: 20,
                 child: _PipGestureBar(
@@ -573,8 +817,10 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
               ),
               
               // 드래그 가능한 구분선 (제스처바) - 1초 롱프레스 후 활성화
-              Positioned(
-                left: constraints.maxWidth * preset.leftRatio - 4,
+              AnimatedPositioned(
+                duration: const Duration(milliseconds: 150),
+                curve: Curves.easeOutCubic,
+                left: leftWidth - 4,
                 top: 0,
                 bottom: 0,
                 child: _RatioResizer(
@@ -733,9 +979,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
               
               // 실제 표시할 프리셋 개수
               final presetsToShow = maxPresets.clamp(0, _presetService.presets.length);
-              
-              // 디버그: 화면 높이와 계산된 값 출력
-              debugPrint('Dock: screenHeight=$screenHeight, isCompact=$isCompact, maxPresets=$maxPresets, presetsToShow=$presetsToShow');
               
               return Column(
                 children: [
